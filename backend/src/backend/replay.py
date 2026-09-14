@@ -46,6 +46,7 @@ from .sample_data import (
     sample_laps,
     sample_stints,
 )
+from .tick_builder import flatten_to_ticks, resolve_driver
 from .tick_source import NoDataError, TickSource
 
 logger = logging.getLogger(__name__)
@@ -193,11 +194,11 @@ class ReplayTickSource(TickSource):
                 "Check the session_key is correct and that the session has run."
             )
 
-        driver_number = self._resolve_driver(stints)
+        driver_number = resolve_driver(stints, self._requested_driver, self._session_key)
         driver_stints = [s for s in stints if s.driver_number == driver_number]
         driver_laps = [lap for lap in race.laps if lap.driver_number == driver_number]
 
-        self._ticks = self._flatten(driver_stints, driver_laps)
+        self._ticks = flatten_to_ticks(driver_stints, driver_laps)
         if not self._ticks:
             raise NoDataError(
                 f"Stint data for driver {driver_number} in session "
@@ -257,93 +258,3 @@ class ReplayTickSource(TickSource):
                 await asyncio.sleep(self._tick_interval)
             yield tick
 
-    # --- internals -------------------------------------------------------
-
-    def _resolve_driver(self, stints: list[Stint]) -> int:
-        """Pick which driver to replay.
-
-        A session's /v1/stints covers the whole grid, but a tick stream is
-        about one car. If the caller named a driver, use it (and say so
-        clearly if that driver isn't in the data). Otherwise pick the car that
-        completed the most laps, tie-broken by lowest number — deterministic,
-        and biased towards a car that actually finished rather than one that
-        retired on lap 3 and would produce a three-tick "race".
-        """
-        available = {s.driver_number for s in stints}
-
-        if self._requested_driver is not None:
-            if self._requested_driver not in available:
-                raise NoDataError(
-                    f"No stint data for driver {self._requested_driver} in session "
-                    f"{self._session_key!r}. Drivers present: "
-                    f"{sorted(available)}"
-                )
-            return self._requested_driver
-
-        furthest: dict[int, int] = {}
-        for stint in stints:
-            furthest[stint.driver_number] = max(
-                furthest.get(stint.driver_number, 0), stint.lap_end
-            )
-
-        # max() over (laps, -number) picks most laps, then lowest number.
-        return max(furthest.items(), key=lambda kv: (kv[1], -kv[0]))[0]
-
-    @staticmethod
-    def _flatten(stints: list[Stint], laps: list[Lap]) -> list[TickMessage]:
-        """Expand stint ranges into one tick per lap, merged with lap times.
-
-        The tyre-age rule: a stint's tyre is `tyre_age_at_start` laps old on
-        its first lap, and ages by one each lap after. So tyre age is
-
-            tyre_age_at_start + (lap - lap_start)
-
-        NOT simply (lap - lap_start) — a set scrubbed in qualifying starts
-        used, and OpenF1 reports that. This is the one calculation in Day 1
-        that Day 2's degradation curve depends on being right.
-
-        Laps are collected into a dict keyed by lap number, processed in
-        stint order, so if two stints claim the same lap (OpenF1 sometimes
-        overlaps at a pit lap) the later stint wins — which matches reality:
-        after the stop, that lap was run on the new set.
-
-        The merge (Day 2): lap timing arrives from a *different* endpoint
-        (/v1/laps) than tyre data (/v1/stints), with no shared row identity.
-        They are joined on (driver_number, lap_number) — the only key both
-        sides carry. Callers have already narrowed both sides to one driver,
-        so the join here is on lap number, and driver_number is asserted
-        rather than matched.
-
-        A lap with no timing entry keeps lap_duration_s = None rather than
-        being dropped. The tick is still true: the car ran that lap on that
-        tyre. Only the fit loses a data point.
-        """
-        timing: dict[int, Lap] = {lap.lap_number: lap for lap in laps}
-
-        by_lap: dict[int, TickMessage] = {}
-
-        for stint in sorted(stints, key=lambda s: (s.stint_number, s.lap_start)):
-            if stint.lap_end < stint.lap_start:
-                logger.warning(
-                    "Skipping stint %s with lap_end (%d) before lap_start (%d)",
-                    stint.stint_number,
-                    stint.lap_end,
-                    stint.lap_start,
-                )
-                continue
-
-            for lap in range(stint.lap_start, stint.lap_end + 1):
-                timed = timing.get(lap)
-                by_lap[lap] = TickMessage(
-                    lap=lap,
-                    driver_number=stint.driver_number,
-                    compound=stint.compound,
-                    tyre_age=stint.tyre_age_at_start + (lap - stint.lap_start),
-                    stint_number=stint.stint_number,
-                    lap_duration_s=timed.lap_duration if timed else None,
-                    is_pit_out_lap=timed.is_pit_out_lap if timed else False,
-                )
-
-        # Sort by lap so the stream is strictly chronological regardless of
-        # what order the stints arrived in.
-        return [by_lap[lap] for lap in sorted(by_lap)]

@@ -26,14 +26,16 @@ Design notes:
   carry on. The one thing we refuse to do is *guess* at a missing value.
 """
 
+import asyncio
 import logging
-from typing import Any
+import time
+from typing import Any, Awaitable, Callable
 
 import httpx
 from pydantic import ValidationError
 
 from .config import Settings
-from .models import Lap, Stint
+from .models import Lap, Session, Stint
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +58,87 @@ class OpenF1BadResponse(OpenF1Error):
     code = "openf1_bad_response"
 
 
+class OpenF1RateLimited(OpenF1Error):
+    """OpenF1 returned 429. We asked for too much, too fast.
+
+    Separate from OpenF1Unavailable because the remedy is different and the
+    blame is ours: unavailable means wait for someone else to fix something,
+    rate-limited means back off and reduce our own request rate. Live mode
+    must distinguish them to respond correctly (SPEC section 10).
+    """
+
+    code = "openf1_rate_limited"
+
+    def __init__(self, detail: str, *, retry_after_seconds: float | None = None) -> None:
+        super().__init__(detail)
+        self.retry_after_seconds = retry_after_seconds
+
+
+class RateLimiter:
+    """Enforces a minimum gap between requests, process-wide.
+
+    OpenF1's free tier is roughly 3 req/s and 30 req/min, and the API
+    advertises no rate-limit headers (verified 2026-09-14: no X-RateLimit-*
+    or Retry-After on a normal response). So there is nothing to react to —
+    compliance has to be enforced on our side, before the request goes out.
+
+    Deliberately simple: one lock, one timestamp, and a sleep. Not a token
+    bucket, because bursts are exactly what we must not allow.
+
+    `clock` and `sleep` are injected rather than hardcoded to
+    time.monotonic / asyncio.sleep, purely so the rate-limit compliance test
+    can drive virtual time and assert the spacing without the suite taking
+    real seconds to run. Production passes neither and gets the real ones.
+    """
+
+    def __init__(
+        self,
+        min_interval_seconds: float,
+        *,
+        clock: Callable[[], float] | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+    ) -> None:
+        self._min_interval = min_interval_seconds
+        self._clock = clock or time.monotonic
+        self._sleep = sleep or asyncio.sleep
+        self._last_request_at: float | None = None
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        """Block until it is safe to make another request."""
+        # The lock matters: without it two coroutines could both read the
+        # same `_last_request_at`, both decide no wait is needed, and fire
+        # simultaneously — breaching the limit precisely when load is high.
+        async with self._lock:
+            now = self._clock()
+            if self._last_request_at is not None:
+                elapsed = now - self._last_request_at
+                remaining = self._min_interval - elapsed
+                if remaining > 0:
+                    await self._sleep(remaining)
+                    now = self._clock()
+            self._last_request_at = now
+
+
 class OpenF1Client:
     """Async wrapper over the OpenF1 endpoints this project uses."""
 
-    def __init__(self, http: httpx.AsyncClient, settings: Settings) -> None:
+    def __init__(
+        self,
+        http: httpx.AsyncClient,
+        settings: Settings,
+        *,
+        rate_limiter: RateLimiter | None = None,
+    ) -> None:
         self._http = http
         self._base_url = settings.openf1_base_url.rstrip("/")
         self._timeout = settings.openf1_timeout_seconds
+        # One limiter for the whole client, so the budget is shared across
+        # endpoints. A per-endpoint limiter would let /stints and /laps each
+        # run at the full rate and jointly double it.
+        self._rate_limiter = rate_limiter or RateLimiter(
+            settings.openf1_min_request_interval_seconds
+        )
 
     async def _get(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         """GET one OpenF1 endpoint and return its rows.
@@ -77,6 +153,10 @@ class OpenF1Client:
         # Drop None params so callers can pass optional filters unconditionally.
         clean = {k: v for k, v in params.items() if v is not None}
 
+        # Every request goes through the limiter, with no bypass. A bypass
+        # for "just this one quick call" is how rate limits get breached.
+        await self._rate_limiter.acquire()
+
         try:
             response = await self._http.get(url, params=clean, timeout=self._timeout)
         except httpx.TimeoutException as exc:
@@ -85,6 +165,21 @@ class OpenF1Client:
             ) from exc
         except httpx.HTTPError as exc:
             raise OpenF1Unavailable(f"Could not reach OpenF1 at {url}: {exc}") from exc
+
+        if response.status_code == 429:
+            # Retry-After is optional and OpenF1 does not currently send it,
+            # but honour it when present rather than assuming our own backoff
+            # is more informed than the server's instruction.
+            retry_after = response.headers.get("Retry-After")
+            try:
+                retry_seconds = float(retry_after) if retry_after else None
+            except ValueError:
+                retry_seconds = None
+            raise OpenF1RateLimited(
+                f"OpenF1 rate-limited the request to {path}. "
+                "Polling is too frequent; backing off.",
+                retry_after_seconds=retry_seconds,
+            )
 
         if response.status_code >= 500:
             raise OpenF1Unavailable(
@@ -157,6 +252,51 @@ class OpenF1Client:
             )
 
         return stints
+
+    async def get_sessions(
+        self,
+        *,
+        session_key: str | int | None = None,
+        year: int | None = None,
+        country_name: str | None = None,
+    ) -> list[Session]:
+        """Fetch session metadata.
+
+        `session_key="latest"` is OpenF1's shortcut for the most recent or
+        currently-running session, and is how live mode asks "is anything
+        happening?" without knowing a key in advance.
+
+        Note what this does NOT do: it makes no judgement about whether a
+        session is live. That is the live window's job, in live.py, where it
+        can be unit-tested against a mocked clock. Keeping the decision out
+        of the HTTP layer is what makes it testable without a network.
+        """
+        rows = await self._get(
+            "sessions",
+            {
+                "session_key": session_key,
+                "year": year,
+                "country_name": country_name,
+            },
+        )
+
+        sessions: list[Session] = []
+        skipped = 0
+        for row in rows:
+            try:
+                sessions.append(Session.model_validate(row))
+            except ValidationError:
+                # A session row missing date_start or date_end cannot take
+                # part in a live-window decision, so it is dropped rather
+                # than defaulted — a guessed date could report a race live
+                # when it is not.
+                skipped += 1
+                logger.warning("Skipping unparseable session row: %r", row)
+
+        if skipped:
+            logger.warning("Dropped %d of %d session rows", skipped, len(rows))
+
+        return sessions
 
     async def get_laps(
         self,

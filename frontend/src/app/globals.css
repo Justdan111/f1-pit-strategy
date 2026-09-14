@@ -13,6 +13,8 @@
   --streaming: #2f9e5e;
   --ended: #4a7fd4;
   --error: #d1495b;
+  --reconnecting: #d2731f;
+  --info: #7b8cde;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
 }
 
@@ -96,7 +98,10 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .banner-streaming  { border-left-color: var(--streaming);  color: var(--streaming); }
 .banner-ended      { border-left-color: var(--ended);      color: var(--ended); }
 .banner-error      { border-left-color: var(--error);      color: var(--error); }
-.banner-connecting .dot { animation: pulse 1s ease-in-out infinite; }
+.banner-reconnecting { border-left-color: var(--reconnecting); color: var(--reconnecting); }
+.banner-info       { border-left-color: var(--info);       color: var(--info); }
+.banner-connecting .dot,
+.banner-reconnecting .dot { animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 
 /* --- layout --- */

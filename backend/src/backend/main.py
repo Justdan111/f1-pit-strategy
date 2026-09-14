@@ -16,7 +16,15 @@ from fastapi.responses import JSONResponse
 
 from .config import Settings, get_settings
 from .decision_engine import DecisionEngine
-from .models import DecisionMessage, EndMessage, ErrorMessage, Stint, TickMessage
+from .live import LATEST_SESSION_KEY, LiveTickSource, NoLiveSessionError
+from .models import (
+    DecisionMessage,
+    EndMessage,
+    ErrorMessage,
+    NoLiveSessionMessage,
+    Stint,
+    TickMessage,
+)
 from .openf1_client import OpenF1Client, OpenF1Error
 from .replay import ReplayTickSource
 from .sample_data import SAMPLE_SESSION_KEY, sample_stints
@@ -69,9 +77,10 @@ async def health() -> dict[str, object]:
     return {
         "status": "ok",
         "service": "f1-pit-strategy",
-        "day": 2,
-        "modes_available": ["replay"],
-        "modes_planned": ["live"],
+        "day": 4,
+        "modes_available": ["replay", "live"],
+        "live_poll_interval_seconds": settings.live_poll_interval_seconds,
+        "live_window_margin_minutes": settings.live_window_margin_minutes,
         "replay_tick_interval_seconds": settings.replay_tick_interval_seconds,
         "pit_lane_cost_seconds": settings.pit_lane_cost_seconds,
         "min_samples_for_fit": settings.min_samples_for_fit,
@@ -110,15 +119,24 @@ def _build_source(
     settings: Settings = app.state.settings
 
     if mode == "live":
-        raise TickSourceError(
-            "Live mode is not implemented yet (planned for Day 4). "
-            "Use ?mode=replay with a finished session_key, or session_key=sample.",
-            code="live_mode_not_implemented",
+        # The Day 1 prediction, realised: one branch here, and nothing
+        # downstream of TickSource changed to accommodate it.
+        if session_key == SAMPLE_SESSION_KEY:
+            raise TickSourceError(
+                "session_key=sample is a fixture and can only be replayed. "
+                "Use ?mode=live with a real session_key, or 'latest'.",
+                code="sample_is_replay_only",
+            )
+        return LiveTickSource(
+            client=app.state.openf1,
+            session_key=session_key,
+            driver_number=driver_number,
+            settings=settings,
         )
 
     if mode != "replay":
         raise TickSourceError(
-            f"Unknown mode {mode!r}. Valid modes: 'replay' (and 'live', Day 4).",
+            f"Unknown mode {mode!r}. Valid modes: 'replay', 'live'.",
             code="unknown_mode",
         )
 
@@ -156,7 +174,7 @@ def _clamp_interval(value: float | None, settings: Settings) -> float | None:
 async def stream_race(
     websocket: WebSocket,
     session_key: str,
-    mode: str = Query("replay", description="'replay' today; 'live' lands on Day 4."),
+    mode: str = Query("replay", description="'replay' or 'live'."),
     driver_number: int | None = Query(None, description="Defaults to the car that ran furthest."),
     tick_interval: float | None = Query(None, description="Override seconds between ticks."),
 ) -> None:
@@ -233,6 +251,15 @@ async def stream_race(
             decisions_sent,
         )
 
+    except NoLiveSessionError as exc:
+        # NOT an error. The request worked, the API answered, and the answer
+        # was "no race is happening" — which is what live mode will report
+        # almost every day of the year (SPEC section 10). Sent as its own
+        # message type so the dashboard can show it as information rather
+        # than as a red failure, then closed cleanly.
+        logger.info("No live session for session_key=%s: %s", session_key, exc.detail)
+        await _send_no_live_session(websocket, exc)
+
     except (TickSourceError, OpenF1Error) as exc:
         # Expected, explainable failures: unknown mode, bad session_key,
         # OpenF1 unreachable. Reported in-protocol so the frontend can show
@@ -289,6 +316,24 @@ def _safe_decision(engine: DecisionEngine, tick: TickMessage) -> DecisionMessage
         return None
 
 
+async def _send_no_live_session(
+    websocket: WebSocket, exc: NoLiveSessionError
+) -> None:
+    """Deliver the `no_live_session` envelope, tolerating a dead socket."""
+    nxt = exc.next_session
+    message = NoLiveSessionMessage(
+        detail=exc.detail,
+        checked_at=exc.checked_at,
+        next_session_key=nxt.session_key if nxt else None,
+        next_session_name=nxt.label if nxt else None,
+        next_session_start=nxt.date_start if nxt else None,
+    )
+    try:
+        await websocket.send_json(message.model_dump(mode="json"))
+    except (WebSocketDisconnect, RuntimeError):
+        logger.debug("Could not deliver no_live_session; client already gone.")
+
+
 async def _send_error(websocket: WebSocket, *, detail: str, code: str | None) -> None:
     """Send an `error` envelope, tolerating an already-dead socket.
 
@@ -324,7 +369,8 @@ async def root() -> JSONResponse:
             "endpoints": {
                 "health": "GET /health",
                 "sample_stints_debug": "GET /race/sample/stints",
-                "stream": "WS /ws/race/{session_key}?mode=replay",
+                "stream": "WS /ws/race/{session_key}?mode=replay|live",
+                "live": f"WS /ws/race/{LATEST_SESSION_KEY}?mode=live",
             },
             "try": "WS /ws/race/sample",
         }
