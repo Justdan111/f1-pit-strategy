@@ -63,7 +63,25 @@ async def run(args: argparse.Namespace) -> int:
                     exit_code = 1
 
                 counts[kind] = counts.get(kind, 0) + 1
-                print(f"[{elapsed:7.3f}s] {kind:<6} {json.dumps(rendered)}")
+
+                if kind == "decision" and not args.raw:
+                    # Decisions carry a dozen fields; printing them raw makes
+                    # the stream unreadable. Show the ones that drive the call.
+                    d = rendered
+                    be = d["laps_to_break_even"]
+                    be_txt = f"{be:>5.1f} laps" if be is not None else "     n/a  "
+                    print(
+                        f"[{elapsed:7.3f}s] {kind:<8} "
+                        f"{d['verdict']:<8} "
+                        f"deg={d['current_compound_degradation_s_per_lap']:+.4f}s/lap "
+                        f"adv={d['fresh_tyre_advantage_s_per_lap']:+6.2f}s/lap "
+                        f"breakeven={be_txt} "
+                        f"delta={d['delta_s']:+8.2f}s "
+                        f"n={d['samples_used']}/{d['samples_seen']} "
+                        f"r2={d['fit_r_squared']:.3f}"
+                    )
+                else:
+                    print(f"[{elapsed:7.3f}s] {kind:<8} {json.dumps(rendered)}")
 
                 if kind == "error":
                     exit_code = 1
@@ -84,6 +102,9 @@ def main() -> int:
     parser.add_argument("--session-key", default="sample")
     parser.add_argument("--mode", default="replay", choices=["replay", "live"])
     parser.add_argument("--driver-number", type=int, default=None)
+    parser.add_argument(
+        "--raw", action="store_true", help="Print decision messages as raw JSON."
+    )
     parser.add_argument(
         "--tick-interval",
         type=float,

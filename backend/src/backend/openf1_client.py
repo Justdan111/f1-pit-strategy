@@ -33,7 +33,7 @@ import httpx
 from pydantic import ValidationError
 
 from .config import Settings
-from .models import Stint
+from .models import Lap, Stint
 
 logger = logging.getLogger(__name__)
 
@@ -158,3 +158,42 @@ class OpenF1Client:
 
         return stints
 
+    async def get_laps(
+        self,
+        session_key: str,
+        driver_number: int | None = None,
+    ) -> list[Lap]:
+        """Fetch per-lap timing for a session, optionally narrowed to one driver.
+
+        Day 2 needs this: stints tell you which tyre was on the car, laps tell
+        you how fast it went. A degradation curve needs both.
+
+        Same contract as get_stints — HTTP in, validated models out. Laps with
+        a null lap_duration are returned as-is rather than dropped: the tick
+        for that lap is still real and still belongs in the stream, it just
+        can't contribute a data point to the fit. Deciding what to do about a
+        missing lap time is the decision engine's call, not the client's.
+        """
+        rows = await self._get(
+            "laps",
+            {"session_key": session_key, "driver_number": driver_number},
+        )
+
+        laps: list[Lap] = []
+        skipped = 0
+        for row in rows:
+            try:
+                laps.append(Lap.model_validate(row))
+            except ValidationError:
+                skipped += 1
+                logger.warning("Skipping unparseable lap row: %r", row)
+
+        if skipped:
+            logger.warning(
+                "Dropped %d of %d lap rows for session_key=%s",
+                skipped,
+                len(rows),
+                session_key,
+            )
+
+        return laps

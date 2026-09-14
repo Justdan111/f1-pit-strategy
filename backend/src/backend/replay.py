@@ -34,19 +34,43 @@ whatever stints it likes without a network or a fixture file.
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import AsyncIterator, Awaitable, Callable
 
 from .config import Settings, get_settings
-from .models import SourceKind, StartMessage, Stint, TickMessage
+from .models import Lap, SourceKind, StartMessage, Stint, TickMessage
 from .openf1_client import OpenF1Client
-from .sample_data import SAMPLE_DRIVER_NUMBER, SAMPLE_SESSION_KEY, sample_stints
+from .sample_data import (
+    SAMPLE_DRIVER_NUMBER,
+    SAMPLE_SESSION_KEY,
+    sample_laps,
+    sample_stints,
+)
 from .tick_source import NoDataError, TickSource
 
 logger = logging.getLogger(__name__)
 
 
-# "Give me the stints for this stream." Async because the real one does HTTP.
-StintLoader = Callable[[], Awaitable[list[Stint]]]
+@dataclass
+class RaceData:
+    """Everything needed to build a tick stream for one session.
+
+    Two separate OpenF1 endpoints, carried together: stints say which tyre was
+    on the car, laps say how fast it went. Day 1 only needed stints; Day 2's
+    degradation curve needs both, so the loader now returns a pair rather than
+    a bare list.
+
+    Bundling them in one object (rather than adding a second loader) keeps a
+    single injection point, which is what let the sample fixture and the live
+    API stay behind the same seam in the first place.
+    """
+
+    stints: list[Stint]
+    laps: list[Lap] = field(default_factory=list)
+
+
+# "Give me the data for this stream." Async because the real one does HTTP.
+RaceDataLoader = Callable[[], Awaitable[RaceData]]
 
 
 class ReplayTickSource(TickSource):
@@ -56,7 +80,7 @@ class ReplayTickSource(TickSource):
         self,
         *,
         session_key: str,
-        loader: StintLoader,
+        loader: RaceDataLoader,
         source: SourceKind,
         driver_number: int | None = None,
         tick_interval_seconds: float | None = None,
@@ -93,8 +117,8 @@ class ReplayTickSource(TickSource):
     ) -> "ReplayTickSource":
         """Replay the offline fixture. No network involved."""
 
-        async def loader() -> list[Stint]:
-            return sample_stints()
+        async def loader() -> RaceData:
+            return RaceData(stints=sample_stints(), laps=sample_laps())
 
         return cls(
             session_key=SAMPLE_SESSION_KEY,
@@ -117,14 +141,22 @@ class ReplayTickSource(TickSource):
     ) -> "ReplayTickSource":
         """Replay a finished race fetched from OpenF1."""
 
-        async def loader() -> list[Stint]:
-            # Deliberately NOT filtered by driver at the API. Fetching the
-            # whole session (one request either way, a few KB bigger) means
-            # _resolve_driver can see the full grid, so asking for a driver
-            # who wasn't in the session produces "driver 99 isn't here, these
-            # are: [...]" instead of an indistinguishable "no data for this
-            # session_key". Filtering is this class's job, not the client's.
-            return await client.get_stints(session_key)
+        async def loader() -> RaceData:
+            # Stints are deliberately NOT filtered by driver at the API.
+            # Fetching the whole session (one request either way, a few KB
+            # bigger) means _resolve_driver can see the full grid, so asking
+            # for a driver who wasn't in the session produces "driver 99 isn't
+            # here, these are: [...]" instead of an indistinguishable "no data
+            # for this session_key". Filtering is this class's job.
+            #
+            # Laps ARE filtered by driver when we know which one we want: a
+            # full session's laps is ~20x the payload and we would throw all
+            # but one driver's away. When no driver was requested we cannot
+            # filter yet (the driver isn't chosen until we've seen the
+            # stints), so we fetch the lot and narrow in _flatten.
+            stints = await client.get_stints(session_key)
+            laps = await client.get_laps(session_key, driver_number)
+            return RaceData(stints=stints, laps=laps)
 
         return cls(
             session_key=session_key,
@@ -152,7 +184,8 @@ class ReplayTickSource(TickSource):
         a failure can be reported as an `error` envelope instead of killing a
         stream that had already claimed to start.
         """
-        stints = await self._loader()
+        race = await self._loader()
+        stints = race.stints
 
         if not stints:
             raise NoDataError(
@@ -162,8 +195,9 @@ class ReplayTickSource(TickSource):
 
         driver_number = self._resolve_driver(stints)
         driver_stints = [s for s in stints if s.driver_number == driver_number]
+        driver_laps = [lap for lap in race.laps if lap.driver_number == driver_number]
 
-        self._ticks = self._flatten(driver_stints)
+        self._ticks = self._flatten(driver_stints, driver_laps)
         if not self._ticks:
             raise NoDataError(
                 f"Stint data for driver {driver_number} in session "
@@ -173,14 +207,27 @@ class ReplayTickSource(TickSource):
         self._driver_number = driver_number
         self._opened = True
 
+        timed = sum(1 for t in self._ticks if t.lap_duration_s is not None)
         logger.info(
-            "Replay ready: session_key=%s source=%s driver=%s laps=%d interval=%.3fs",
+            "Replay ready: session_key=%s source=%s driver=%s laps=%d "
+            "(%d with lap times) interval=%.3fs",
             self._session_key,
             self._source,
             driver_number,
             len(self._ticks),
+            timed,
             self._tick_interval,
         )
+        if timed == 0:
+            # Not fatal — the stream is still valid and Day 1's behaviour is
+            # unchanged. But every decision will be skipped, so say why once
+            # here rather than leaving someone to wonder at the silence.
+            logger.warning(
+                "No lap times merged for session_key=%s driver=%s. The stream "
+                "will emit ticks but no decisions.",
+                self._session_key,
+                driver_number,
+            )
 
         return StartMessage(
             session_key=self._session_key,
@@ -243,8 +290,8 @@ class ReplayTickSource(TickSource):
         return max(furthest.items(), key=lambda kv: (kv[1], -kv[0]))[0]
 
     @staticmethod
-    def _flatten(stints: list[Stint]) -> list[TickMessage]:
-        """Expand stint ranges into one tick per lap.
+    def _flatten(stints: list[Stint], laps: list[Lap]) -> list[TickMessage]:
+        """Expand stint ranges into one tick per lap, merged with lap times.
 
         The tyre-age rule: a stint's tyre is `tyre_age_at_start` laps old on
         its first lap, and ages by one each lap after. So tyre age is
@@ -259,7 +306,20 @@ class ReplayTickSource(TickSource):
         stint order, so if two stints claim the same lap (OpenF1 sometimes
         overlaps at a pit lap) the later stint wins — which matches reality:
         after the stop, that lap was run on the new set.
+
+        The merge (Day 2): lap timing arrives from a *different* endpoint
+        (/v1/laps) than tyre data (/v1/stints), with no shared row identity.
+        They are joined on (driver_number, lap_number) — the only key both
+        sides carry. Callers have already narrowed both sides to one driver,
+        so the join here is on lap number, and driver_number is asserted
+        rather than matched.
+
+        A lap with no timing entry keeps lap_duration_s = None rather than
+        being dropped. The tick is still true: the car ran that lap on that
+        tyre. Only the fit loses a data point.
         """
+        timing: dict[int, Lap] = {lap.lap_number: lap for lap in laps}
+
         by_lap: dict[int, TickMessage] = {}
 
         for stint in sorted(stints, key=lambda s: (s.stint_number, s.lap_start)):
@@ -273,12 +333,15 @@ class ReplayTickSource(TickSource):
                 continue
 
             for lap in range(stint.lap_start, stint.lap_end + 1):
+                timed = timing.get(lap)
                 by_lap[lap] = TickMessage(
                     lap=lap,
                     driver_number=stint.driver_number,
                     compound=stint.compound,
                     tyre_age=stint.tyre_age_at_start + (lap - stint.lap_start),
                     stint_number=stint.stint_number,
+                    lap_duration_s=timed.lap_duration if timed else None,
+                    is_pit_out_lap=timed.is_pit_out_lap if timed else False,
                 )
 
         # Sort by lap so the stream is strictly chronological regardless of
