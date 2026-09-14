@@ -9,11 +9,13 @@ import { Mode } from "@/lib/types";
  * A plain text input, per DAY3.md — a race browser against /v1/sessions is
  * explicitly out of scope.
  *
- * The `live` option exists but is disabled and labelled. DAY3.md is direct
- * about why: LiveTickSource is not built until Day 4, and an enabled toggle
- * would promise something the backend cannot do. Disabled-and-explained is
- * honest; hidden would be too, but it would also hide that live mode is the
- * point of the whole project.
+ * The `live` option is enabled as of Day 4, now that LiveTickSource exists.
+ * It was deliberately disabled before that, because an enabled toggle would
+ * have promised something the backend could not do.
+ *
+ * Enabling it required no change to the connection layer: Day 3 passed
+ * `mode` through generically rather than hardcoding "replay", so this is the
+ * one-line change it was designed to be.
  */
 export function ConnectForm({
   onConnect,
@@ -54,9 +56,7 @@ export function ConnectForm({
           onChange={(event) => setMode(event.target.value as Mode)}
         >
           <option value="replay">replay</option>
-          <option value="live" disabled>
-            live — not yet available (Day 4)
-          </option>
+          <option value="live">live</option>
         </select>
       </label>
 
@@ -70,8 +70,12 @@ export function ConnectForm({
       </div>
 
       <p className="hint">
-        <code>sample</code> streams the offline fixture. A numeric key such as{" "}
-        <code>9904</code> replays a finished race from OpenF1.
+        <strong>replay:</strong> <code>sample</code> streams the offline
+        fixture; a numeric key such as <code>9904</code> replays a finished
+        race from OpenF1.{" "}
+        <strong>live:</strong> use <code>latest</code> to follow whatever
+        session is running now. Outside a race weekend that correctly reports
+        no live session — the next one is the Azerbaijan GP, 24–26 September.
       </p>
     </form>
   );

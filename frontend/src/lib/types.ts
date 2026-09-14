@@ -66,6 +66,17 @@ export interface DecisionMessage {
   note: string | null;
 }
 
+export interface NoLiveSessionMessage {
+  type: "no_live_session";
+  detail: string;
+  /** ISO-8601. When the server checked, so a stale page cannot look current. */
+  checked_at: string;
+  next_session_key: number | null;
+  next_session_name: string | null;
+  /** ISO-8601, or null when nothing is scheduled. */
+  next_session_start: string | null;
+}
+
 export interface EndMessage {
   type: "end";
   session_key: string;
@@ -89,6 +100,7 @@ export type StreamMessage =
   | StartMessage
   | TickMessage
   | DecisionMessage
+  | NoLiveSessionMessage
   | EndMessage
   | ErrorMessage;
 
@@ -111,6 +123,7 @@ export function isStreamMessage(value: unknown): value is StreamMessage {
     type === "start" ||
     type === "tick" ||
     type === "decision" ||
+    type === "no_live_session" ||
     type === "end" ||
     type === "error"
   );

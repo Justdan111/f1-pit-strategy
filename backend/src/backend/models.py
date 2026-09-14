@@ -14,6 +14,7 @@ somebody else's API, which can change under us. If we streamed raw OpenF1
 rows to the browser, an upstream field rename would become a frontend bug.
 """
 
+from datetime import datetime
 from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -80,6 +81,37 @@ class Lap(BaseModel):
 
     session_key: int | None = None
     meeting_key: int | None = None
+
+
+class Session(BaseModel):
+    """One session from OpenF1 /v1/sessions.
+
+    Field names verified against the real API on 2026-09-14. `date_start` and
+    `date_end` arrive as ISO-8601 with an explicit UTC offset, which pydantic
+    parses into timezone-aware datetimes — that awareness is load-bearing,
+    since comparing a naive datetime against an aware one raises, and the
+    whole live-window check is a datetime comparison.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    session_key: int
+    session_name: str = "Unknown"
+    session_type: str = "Unknown"
+    date_start: datetime
+    date_end: datetime
+    is_cancelled: bool = False
+
+    meeting_key: int | None = None
+    country_name: str | None = None
+    location: str | None = None
+    year: int | None = None
+
+    @property
+    def label(self) -> str:
+        """Human description, e.g. 'Race at Baku'."""
+        where = self.location or self.country_name
+        return f"{self.session_name} at {where}" if where else self.session_name
 
 
 class StartMessage(BaseModel):
@@ -232,6 +264,34 @@ class DecisionMessage(BaseModel):
     note: str | None = None
 
 
+class NoLiveSessionMessage(BaseModel):
+    """There is no F1 session running right now.
+
+    A DEDICATED TYPE, deliberately not an `error`. SPEC section 10: live mode
+    "will spend most of its life with no session to connect to; this must be
+    an expected, clearly-communicated state, not an error."
+
+    The distinction is not pedantry. Nothing has failed here — the request
+    worked, the API answered, and the answer was "no race is happening". If
+    this were an ErrorMessage the dashboard would show a red failure banner
+    for the single most common outcome of live mode, training the user to
+    ignore the one component that is supposed to tell them when something is
+    actually broken.
+
+    Carries the next session when one is known, so the answer is "not until
+    Thursday 08:30" rather than a bare no.
+    """
+
+    type: Literal["no_live_session"] = "no_live_session"
+    detail: str
+    # When the check ran, so a stale page cannot look current.
+    checked_at: datetime
+
+    next_session_key: int | None = None
+    next_session_name: str | None = None
+    next_session_start: datetime | None = None
+
+
 class EndMessage(BaseModel):
     """Stream finished normally: replay exhausted, or live session closed."""
 
@@ -264,6 +324,13 @@ class ErrorMessage(BaseModel):
 # protocol a single named thing that tests and future clients can validate
 # against, instead of four unrelated classes.
 StreamMessage = Annotated[
-    Union[StartMessage, TickMessage, DecisionMessage, EndMessage, ErrorMessage],
+    Union[
+        StartMessage,
+        TickMessage,
+        DecisionMessage,
+        NoLiveSessionMessage,
+        EndMessage,
+        ErrorMessage,
+    ],
     Field(discriminator="type"),
 ]

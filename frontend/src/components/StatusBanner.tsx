@@ -12,10 +12,30 @@ import { ConnectionStatus, RaceStreamState } from "@/lib/useRaceStream";
 const COPY: Record<ConnectionStatus, { title: string; tone: string }> = {
   idle: { title: "Not connected", tone: "idle" },
   connecting: { title: "Connecting…", tone: "connecting" },
+  // Distinct from `connecting` in both word and colour. "Connecting" means
+  // nothing has started; "Reconnecting" means we were streaming and lost it.
+  // Showing the same thing for both would hide a dropped race behind what
+  // looks like a normal startup.
+  reconnecting: { title: "Reconnecting…", tone: "reconnecting" },
   streaming: { title: "Streaming", tone: "streaming" },
   ended: { title: "Stream ended", tone: "ended" },
+  // Informational, not a failure: live mode spends most of its life here.
+  no_live_session: { title: "No live session", tone: "info" },
   error: { title: "Error", tone: "error" },
 };
+
+function formatWhen(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
 
 export function StatusBanner({ state }: { state: RaceStreamState }) {
   const { title, tone } = COPY[state.status];
@@ -36,6 +56,32 @@ export function StatusBanner({ state }: { state: RaceStreamState }) {
           Opening the WebSocket. The server has not confirmed the stream yet —
           it may still reject the request.
         </p>
+      )}
+
+      {state.status === "reconnecting" && (
+        <p>
+          The connection dropped. Retrying (attempt {state.reconnectAttempt} of{" "}
+          6) in {Math.round(state.reconnectDelayMs / 1000)}s. The stream will
+          restart from the beginning of the available data.
+        </p>
+      )}
+
+      {/* Not an error, and deliberately not styled as one. This is the
+          normal answer for live mode outside a race weekend. */}
+      {state.status === "no_live_session" && state.noLiveSession && (
+        <>
+          <p>{state.noLiveSession.detail}</p>
+          {state.noLiveSession.next_session_start && (
+            <p>
+              <strong>Next session:</strong>{" "}
+              {state.noLiveSession.next_session_name ?? "unknown"} —{" "}
+              {formatWhen(state.noLiveSession.next_session_start)}
+            </p>
+          )}
+          <p className="muted">
+            Checked at {formatWhen(state.noLiveSession.checked_at)}.
+          </p>
+        </>
       )}
 
       {state.status === "streaming" && state.start && (

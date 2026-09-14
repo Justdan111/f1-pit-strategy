@@ -22,3 +22,17 @@ backend = "backend:main"
 [build-system]
 requires = ["uv_build>=0.12.13,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# asyncio_mode = "auto" means an `async def test_...` just runs, with no
+# per-test decorator. Most of this codebase is async; requiring a marker on
+# every test would be noise that obscures what each test actually asserts.
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"

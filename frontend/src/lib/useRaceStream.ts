@@ -4,11 +4,29 @@ import { useCallback, useEffect, useMemo, useRef, useReducer } from "react";
 import {
   DecisionMessage,
   Mode,
+  NoLiveSessionMessage,
   StartMessage,
   StreamMessage,
   TickMessage,
   isStreamMessage,
 } from "./types";
+
+/**
+ * Reconnect backoff (Day 4).
+ *
+ * Doubling from 1s, capped at 15s, for at most 6 attempts. Capped because an
+ * unbounded backoff eventually means a page that looks connected but gave up
+ * an hour ago; finite because retrying forever hides a backend that is
+ * genuinely down. When the attempts run out the UI says so and hands control
+ * back to the user.
+ */
+const RECONNECT_INITIAL_MS = 1000;
+const RECONNECT_MAX_MS = 15000;
+const RECONNECT_MAX_ATTEMPTS = 6;
+
+function backoffFor(attempt: number): number {
+  return Math.min(RECONNECT_INITIAL_MS * 2 ** (attempt - 1), RECONNECT_MAX_MS);
+}
 
 /**
  * Connection lifecycle.
@@ -22,8 +40,10 @@ import {
 export type ConnectionStatus =
   | "idle"
   | "connecting"
+  | "reconnecting"
   | "streaming"
   | "ended"
+  | "no_live_session"
   | "error";
 
 export interface RaceStreamState {
@@ -38,6 +58,12 @@ export interface RaceStreamState {
   /** Set on `end`. Carries the server's own totals for cross-checking. */
   end: { total_ticks: number; total_decisions: number; reason: string } | null;
   error: { detail: string; code: string | null } | null;
+  /** Set when the server reports no session is live. Not an error. */
+  noLiveSession: NoLiveSessionMessage | null;
+  /** Which reconnect attempt is in flight (0 when not reconnecting). */
+  reconnectAttempt: number;
+  /** Delay before the in-flight reconnect attempt, for an honest countdown. */
+  reconnectDelayMs: number;
   /**
    * Count of decisions that arrived for a lap with no matching tick.
    *
@@ -58,11 +84,17 @@ const INITIAL_STATE: RaceStreamState = {
   decisionCount: 0,
   end: null,
   error: null,
+  noLiveSession: null,
+  reconnectAttempt: 0,
+  reconnectDelayMs: 0,
   orderingViolations: 0,
 };
 
 type Action =
   | { kind: "connect_requested" }
+  | { kind: "reconnect_scheduled"; attempt: number; delayMs: number }
+  | { kind: "reconnect_attempt" }
+  | { kind: "retries_exhausted" }
   | { kind: "socket_open" }
   | { kind: "message"; message: StreamMessage }
   | { kind: "user_disconnected" }
@@ -93,6 +125,28 @@ function reducer(state: RaceStreamState, action: Action): RaceStreamState {
       // race's ticks on screen under a new session_key would be a display
       // that lies about what it is showing.
       return { ...INITIAL_STATE, status: "connecting" };
+
+    case "reconnect_scheduled":
+      // The drop is now visible as its own state rather than as a generic
+      // error. DAY4.md wants `reconnecting` distinguishable from the initial
+      // `connecting`: one means "we have not started", the other means "we
+      // were streaming and lost it", and they need different copy.
+      return {
+        ...state,
+        status: "reconnecting",
+        reconnectAttempt: action.attempt,
+        reconnectDelayMs: action.delayMs,
+      };
+
+    case "reconnect_attempt":
+      // Ticks are cleared because the server restarts the stream from the
+      // beginning on a new connection — keeping the old ones would produce
+      // duplicates and break the timeline/decision ordering invariant.
+      return {
+        ...INITIAL_STATE,
+        status: "connecting",
+        reconnectAttempt: state.reconnectAttempt,
+      };
 
     case "socket_open":
       // Deliberately NOT "streaming" yet. The socket being open only means
@@ -139,6 +193,12 @@ function reducer(state: RaceStreamState, action: Action): RaceStreamState {
             },
           };
 
+        case "no_live_session":
+          // Expected, not a failure: live mode spends most of its life here.
+          // Given its own status so the UI can present it as information
+          // rather than as a red error banner (SPEC section 10).
+          return { ...state, status: "no_live_session", noLiveSession: message };
+
         case "error":
           // An `error` envelope is the server answering in-protocol, not the
           // transport failing. It is reported as such, with the server's own
@@ -181,24 +241,38 @@ function reducer(state: RaceStreamState, action: Action): RaceStreamState {
       };
 
     case "socket_closed":
-      // Order matters here. The server sends `end` and then closes, so a
-      // close arriving after `ended` is the normal path and must not be
-      // rewritten as an error. Equally, a close while still `streaming` is a
-      // genuine drop and must NOT be allowed to look like a clean finish.
-      // Reconnecting is Day 4; saying so plainly is today's job.
+      // Order matters. The server sends `end` and then closes, so a close
+      // arriving after `ended` (or after `error`, or `no_live_session`) is
+      // the normal path and must not be rewritten. A close while still
+      // `streaming` is a genuine drop.
+      //
+      // As of Day 4 the hook schedules a reconnect on a drop, so this only
+      // produces a terminal error once the retries are exhausted — see
+      // `retries_exhausted`.
       if (state.status === "streaming" || state.status === "connecting") {
         return {
           ...state,
           status: "error",
           error: {
-            detail:
-              "The connection closed before the stream finished. No reconnect " +
-              "is attempted yet (planned for Day 4) — press Connect to retry.",
+            detail: "The connection closed before the stream finished.",
             code: "connection_dropped",
           },
         };
       }
       return state;
+
+    case "retries_exhausted":
+      return {
+        ...state,
+        status: "error",
+        reconnectAttempt: 0,
+        error: {
+          detail:
+            `The connection dropped and ${RECONNECT_MAX_ATTEMPTS} reconnect ` +
+            "attempts all failed. The backend may be down. Press Connect to try again.",
+          code: "reconnect_failed",
+        },
+      };
 
     case "reset":
       return INITIAL_STATE;
@@ -223,6 +297,11 @@ export function buildStreamUrl(
 export function useRaceStream() {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const socketRef = useRef<WebSocket | null>(null);
+  const targetRef = useRef<{ sessionKey: string; mode: Mode } | null>(null);
+  const attemptRef = useRef(0);
+  const timerRef = useRef<number | null>(null);
+  const shouldReconnectRef = useRef(false);
+  const scheduleReconnectRef = useRef<() => void>(() => {});
 
   /**
    * Close the socket without touching state.
@@ -234,6 +313,11 @@ export function useRaceStream() {
    * update).
    */
   const teardown = useCallback(() => {
+    shouldReconnectRef.current = false;
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
     const socket = socketRef.current;
     socketRef.current = null;
     if (socket) {
@@ -247,15 +331,22 @@ export function useRaceStream() {
 
   /** The user pressed Disconnect: close, and say so. */
   const disconnect = useCallback(() => {
+    // Stop reconnecting first: the user asking to stop must not be answered
+    // by a retry a second later.
+    targetRef.current = null;
+    attemptRef.current = 0;
     teardown();
     dispatch({ kind: "user_disconnected" });
   }, [teardown]);
 
-  const connect = useCallback(
+  /**
+   * Open a socket and attach handlers. Shared by the first connection and by
+   * every reconnect attempt, so both take exactly the same code path — a
+   * reconnect that differs from a connect is a reconnect that is not tested
+   * by connecting.
+   */
+  const openSocket = useCallback(
     (sessionKey: string, mode: Mode) => {
-      teardown();
-      dispatch({ kind: "connect_requested" });
-
       let socket: WebSocket;
       try {
         socket = new WebSocket(buildStreamUrl(sessionKey, mode));
@@ -267,6 +358,12 @@ export function useRaceStream() {
         return;
       }
       socketRef.current = socket;
+      // Armed here, cleared the moment the server gives a final answer. Set
+      // imperatively rather than derived from `state.status`, because
+      // `onclose` can fire before React has re-rendered — a ref updated
+      // during render would then still say "streaming" and trigger a
+      // reconnect after a perfectly clean finish.
+      shouldReconnectRef.current = true;
 
       socket.onopen = () => dispatch({ kind: "socket_open" });
 
@@ -282,22 +379,32 @@ export function useRaceStream() {
           return;
         }
         if (!isStreamMessage(parsed)) {
-          // Fail loudly rather than ignoring it. An unknown `type` means the
-          // frontend and backend protocols have diverged, which is worth
-          // knowing immediately instead of discovering as a missing row.
           dispatch({
             kind: "transport_error",
             detail: `Unrecognised message type from server: ${JSON.stringify(parsed).slice(0, 200)}`,
           });
           return;
         }
+        // A `start` proves the connection is healthy, so the backoff resets.
+        // Without this, a stream that drops once an hour would eventually be
+        // treated as though it had failed six times in a row.
+        if (parsed.type === "start") attemptRef.current = 0;
+        // Final answers. Retrying any of these would just ask the backend
+        // the same question again and get the same reply.
+        if (
+          parsed.type === "end" ||
+          parsed.type === "error" ||
+          parsed.type === "no_live_session"
+        ) {
+          shouldReconnectRef.current = false;
+        }
         dispatch({ kind: "message", message: parsed });
       };
 
-      // `onerror` gives no useful detail by design (the browser withholds it
-      // to avoid leaking cross-origin information), so the message here says
-      // what is actionable rather than pretending to diagnose.
       socket.onerror = () =>
+        // Note: no reconnect suppression here. `onerror` is always followed
+        // by `onclose`, and a transport error on a live stream is exactly
+        // the case worth retrying.
         dispatch({
           kind: "transport_error",
           detail:
@@ -305,9 +412,67 @@ export function useRaceStream() {
             `${DEFAULT_BACKEND}? Start it with: uv run uvicorn backend.main:app`,
         });
 
-      socket.onclose = () => dispatch({ kind: "socket_closed" });
+      socket.onclose = () => {
+        socketRef.current = null;
+        // Reconnect ONLY on an unexpected drop. A clean `end`, a server
+        // `error`, and `no_live_session` are all final answers — retrying
+        // them would hammer the backend to be told the same thing again.
+        if (shouldReconnectRef.current) {
+          scheduleReconnectRef.current();
+        } else {
+          dispatch({ kind: "socket_closed" });
+        }
+      };
     },
-    [teardown],
+    [],
+  );
+
+  /**
+   * Schedule the next reconnect attempt.
+   *
+   * `openSocket` and this function are mutually recursive — a closed socket
+   * schedules a retry, and the retry opens a socket — so one of them has to
+   * be reached indirectly. `openSocket` calls this through a ref, which is
+   * kept in sync in an effect below rather than assigned during render:
+   * mutating a ref while rendering can desync it from what a concurrent
+   * render observes, which is why React's lint rules forbid it.
+   */
+  const scheduleReconnect = useCallback(() => {
+    const target = targetRef.current;
+    if (!target) return;
+
+    attemptRef.current += 1;
+    if (attemptRef.current > RECONNECT_MAX_ATTEMPTS) {
+      dispatch({ kind: "retries_exhausted" });
+      return;
+    }
+
+    const delay = backoffFor(attemptRef.current);
+    dispatch({
+      kind: "reconnect_scheduled",
+      attempt: attemptRef.current,
+      delayMs: delay,
+    });
+
+    timerRef.current = window.setTimeout(() => {
+      dispatch({ kind: "reconnect_attempt" });
+      openSocket(target.sessionKey, target.mode);
+    }, delay);
+  }, [openSocket]);
+
+  useEffect(() => {
+    scheduleReconnectRef.current = scheduleReconnect;
+  }, [scheduleReconnect]);
+
+  const connect = useCallback(
+    (sessionKey: string, mode: Mode) => {
+      teardown();
+      targetRef.current = { sessionKey, mode };
+      attemptRef.current = 0;
+      dispatch({ kind: "connect_requested" });
+      openSocket(sessionKey, mode);
+    },
+    [teardown, openSocket],
   );
 
   // Close the socket if the component unmounts mid-stream, so a navigation

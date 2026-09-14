@@ -8,8 +8,10 @@ Every expected value below was computed by hand from the stated line and tyre
 age BEFORE running the engine, and is hardcoded here. If the engine's output
 drifts, this fails. Run:  uv run python scripts/check_decisions.py
 
-No pytest yet (not a project dependency). Turning these into real tests is
-Day 4 hardening work.
+SUPERSEDED (Day 4): these scenarios now live in tests/test_decision_engine.py
+and run under pytest with `uv run pytest`. This script is kept because it
+prints the full comparison table, which is useful when working on the engine
+by hand; the pytest version is what CI and regressions rely on.
 """
 
 import sys
