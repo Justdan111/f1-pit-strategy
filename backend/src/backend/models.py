@@ -58,6 +58,30 @@ class Stint(BaseModel):
         return max(0, self.lap_end - self.lap_start + 1)
 
 
+class Lap(BaseModel):
+    """One completed lap, from OpenF1 /v1/laps.
+
+    Field names match the real API (verified 2026-09-14 against session_key
+    9904). Only the fields Day 2 needs are modelled; `extra="ignore"` drops
+    the sector times, speed traps and segment arrays we don't use.
+
+    `lap_duration` is genuinely nullable upstream — a lap that was never
+    completed has no duration. We keep it optional rather than defaulting it,
+    because inventing a lap time would feed a fabricated number straight into
+    the degradation fit.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    driver_number: int
+    lap_number: int
+    lap_duration: float | None = None
+    is_pit_out_lap: bool = False
+
+    session_key: int | None = None
+    meeting_key: int | None = None
+
+
 class StartMessage(BaseModel):
     """First message on every stream. Tells the client what it's about to get.
 
@@ -88,6 +112,125 @@ class TickMessage(BaseModel):
     tyre_age: int
     stint_number: int
 
+    # --- Day 2 additions ---
+    # Both fields live in the SHARED tick contract, not in replay-specific
+    # code, because LiveTickSource must supply them too (DAY2.md). Both come
+    # from OpenF1 /v1/laps, which live mode polls exactly like replay reads
+    # it, so neither field is one that only replay can fill.
+
+    # Optional on purpose. OpenF1 returns null lap_duration for laps that
+    # were never completed, and a tick with an unknown lap time is still a
+    # valid tick — it just can't feed the degradation fit. Making this a
+    # required float would force us to invent a number, and a fabricated lap
+    # time is indistinguishable from a real one once it's in the regression.
+    lap_duration_s: float | None = None
+
+    # An out-lap starts in the pit lane and is many seconds slow for reasons
+    # that have nothing to do with tyre wear. Carried so the decision engine
+    # can exclude it from the fit; measured at +18.1s on real Baku data.
+    is_pit_out_lap: bool = False
+
+
+Verdict = Literal["pit_now", "stay_out"]
+
+
+class DecisionMessage(BaseModel):
+    """The pit/stay call, plus every number that produced it.
+
+    SPEC section 10: "explainability over accuracy". Nothing here is a black
+    box — a reader should be able to recompute `verdict` by hand from the
+    other fields, and disagree with it if the numbers look wrong.
+
+    Field names started from the DAY2.md draft. Two notes on where they moved:
+
+    1. The draft's example numbers do not actually compute
+       (92.4 vs 89.1 + 22.0 is a gap of -18.7s, but the example shows
+       delta_s: -0.7). That draft was written before the model existed, so
+       the shape was kept and the arithmetic defined properly here.
+
+    2. `laps_to_break_even` is new, and it is the field that makes the rest
+       usable. See its docstring below.
+
+    SIGN CONVENTION, stated once and relied on everywhere:
+
+        delta_s = time SAVED by pitting, over the next lap
+                = projected_time_current_tyres_s
+                  - (projected_time_fresh_tyres_s + pit_lane_cost_s)
+
+    So delta_s > 0 means pitting is faster, and verdict == "pit_now".
+    """
+
+    type: Literal["decision"] = "decision"
+    lap: int
+    driver_number: int
+    compound: str
+    tyre_age: int
+
+    verdict: Verdict
+
+    # --- the fitted curve ---
+    # Slope of lap time against tyre age for this compound, from the samples
+    # seen so far IN THIS CONNECTION. Positive = the tyre is getting slower,
+    # which is the normal case. Can legitimately come out negative or zero
+    # (see `degradation_is_measurable`).
+    current_compound_degradation_s_per_lap: float
+    fit_intercept_s: float
+    fit_r_squared: float
+    samples_used: int
+    samples_seen: int
+
+    # --- the one-lap comparison (the rule DAY2.md specifies) ---
+    projected_time_current_tyres_s: float
+    projected_time_fresh_tyres_s: float
+    pit_lane_cost_s: float
+    delta_s: float
+
+    # --- the number the one-lap comparison hides ---
+    # How much time a fresh set of this compound would save, per lap, versus
+    # the set currently on the car. Derived, not fitted:
+    #
+    #   old tyre on lap k from now:  b + m*(A + k)
+    #   new tyre on lap k from now:  b + m*k
+    #   difference:                  m * A          <- constant in k
+    #
+    # So the advantage is the degradation slope times the CURRENT TYRE AGE,
+    # and it is the same on every future lap. This is the quantity the whole
+    # decision turns on, so it is reported rather than left implicit.
+    fresh_tyre_advantage_s_per_lap: float
+
+    # --- what the one-lap comparison cannot tell you ---
+    # Laps you must run on the fresh set before the stop pays for itself:
+    #
+    #   laps_to_break_even = pit_lane_cost_s / fresh_tyre_advantage_s_per_lap
+    #
+    # NOT pit_cost / slope. The advantage per lap is m*A, not m — dividing by
+    # the slope alone would overstate the payback period by a factor of the
+    # tyre's age (a factor of ~19 on an old set), turning a realistic 10-lap
+    # pit window into a nonsensical 200-lap one.
+    #
+    # This field exists because the one-lap rule DAY2.md specifies is
+    # structurally near-incapable of saying "pit": delta_s only goes positive
+    # when the advantage exceeds the whole 22-second pit cost within a single
+    # lap, which needs m*A > 22 — far outside anything a real tyre reaches.
+    # The verdict is still computed exactly as specified; this is the field
+    # that makes it actionable rather than permanently "stay out".
+    #
+    # None when the advantage is not positive — a tyre that is not getting
+    # slower has no break-even point.
+    laps_to_break_even: float | None = None
+
+    # False when the fitted slope is <= 0, i.e. the data does not show the
+    # tyre getting slower. Real causes: fuel burn (the car sheds ~100kg over
+    # a stint, worth roughly -0.03 s/lap of lap time, which can exceed a hard
+    # tyre's degradation), a short sample, or track evolution. Not an error —
+    # a state the client must be able to display honestly rather than
+    # dressing up as a confident verdict.
+    degradation_is_measurable: bool = True
+
+    # Human-readable caveat, or None. Surfaced so a UI never has to infer
+    # "why does this say stay out forever?" from the numbers alone.
+    note: str | None = None
+
 
 class EndMessage(BaseModel):
     """Stream finished normally: replay exhausted, or live session closed."""
@@ -95,6 +238,10 @@ class EndMessage(BaseModel):
     type: Literal["end"] = "end"
     session_key: str
     total_ticks: int
+    # Ticks without decisions is a normal outcome (early laps, or a compound
+    # with too few clean samples), so the two counts are reported separately
+    # rather than assumed equal.
+    total_decisions: int = 0
     reason: str = "completed"
 
 
@@ -117,6 +264,6 @@ class ErrorMessage(BaseModel):
 # protocol a single named thing that tests and future clients can validate
 # against, instead of four unrelated classes.
 StreamMessage = Annotated[
-    Union[StartMessage, TickMessage, EndMessage, ErrorMessage],
+    Union[StartMessage, TickMessage, DecisionMessage, EndMessage, ErrorMessage],
     Field(discriminator="type"),
 ]

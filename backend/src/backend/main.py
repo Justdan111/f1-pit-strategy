@@ -15,7 +15,8 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from .config import Settings, get_settings
-from .models import EndMessage, ErrorMessage, Stint
+from .decision_engine import DecisionEngine
+from .models import DecisionMessage, EndMessage, ErrorMessage, Stint, TickMessage
 from .openf1_client import OpenF1Client, OpenF1Error
 from .replay import ReplayTickSource
 from .sample_data import SAMPLE_SESSION_KEY, sample_stints
@@ -68,10 +69,12 @@ async def health() -> dict[str, object]:
     return {
         "status": "ok",
         "service": "f1-pit-strategy",
-        "day": 1,
+        "day": 2,
         "modes_available": ["replay"],
         "modes_planned": ["live"],
         "replay_tick_interval_seconds": settings.replay_tick_interval_seconds,
+        "pit_lane_cost_seconds": settings.pit_lane_cost_seconds,
+        "min_samples_for_fit": settings.min_samples_for_fit,
     }
 
 
@@ -176,6 +179,13 @@ async def stream_race(
 
     source: TickSource | None = None
     sent = 0
+    decisions_sent = 0
+
+    # One engine per connection, constructed here and never shared. That is
+    # the whole of the "incremental, only data seen so far" requirement made
+    # structural: a fresh connection cannot inherit another connection's
+    # history, because there is nothing to inherit it from.
+    engine = DecisionEngine(settings)
 
     try:
         source = _build_source(
@@ -197,12 +207,18 @@ async def stream_race(
             await websocket.send_json(tick.model_dump(mode="json"))
             sent += 1
 
+            decision = _safe_decision(engine, tick)
+            if decision is not None:
+                await websocket.send_json(decision.model_dump(mode="json"))
+                decisions_sent += 1
+
         # Falling out of the loop means the source is exhausted: replay
         # finished, or a live session ended.
         await websocket.send_json(
             EndMessage(
                 session_key=session_key,
                 total_ticks=sent,
+                total_decisions=decisions_sent,
                 reason="completed",
             ).model_dump(mode="json")
         )
@@ -211,7 +227,10 @@ async def stream_race(
         # Entirely normal: the client closed the tab mid-race. Not an error,
         # and there is nobody left to send an error envelope to.
         logger.info(
-            "Client disconnected from session_key=%s after %d ticks.", session_key, sent
+            "Client disconnected from session_key=%s after %d ticks, %d decisions.",
+            session_key,
+            sent,
+            decisions_sent,
         )
 
     except (TickSourceError, OpenF1Error) as exc:
@@ -239,6 +258,35 @@ async def stream_race(
         if source is not None:
             await source.close()
         await _close_quietly(websocket)
+
+
+def _safe_decision(engine: DecisionEngine, tick: TickMessage) -> DecisionMessage | None:
+    """Compute a decision for one tick, never letting it break the stream.
+
+    Two distinct "no decision" cases, and they are not the same thing:
+
+    - engine.observe() returns None. Expected and normal: fewer than the
+      minimum clean samples for this compound, or every sample at one tyre
+      age. Nothing has gone wrong; there is simply nothing honest to say yet.
+      DAY2.md asks for exactly this — skip, don't crash.
+
+    - engine.observe() raises. A bug. The tick stream is still valid and the
+      client is still entitled to it, so the stream continues without
+      decisions rather than dying. Logged with a full traceback, because a
+      silently decision-free stream is precisely the "looks fine, isn't"
+      failure this day is supposed to guard against.
+    """
+    try:
+        return engine.observe(tick)
+    except Exception:
+        logger.exception(
+            "Decision engine failed on lap %s (compound=%s, tyre_age=%s). "
+            "Continuing the tick stream without decisions.",
+            tick.lap,
+            tick.compound,
+            tick.tyre_age,
+        )
+        return None
 
 
 async def _send_error(websocket: WebSocket, *, detail: str, code: str | None) -> None:
