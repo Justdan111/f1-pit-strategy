@@ -15,9 +15,13 @@ uv run uvicorn backend.main:app --reload      # http://127.0.0.1:8000
 Then:
 
 ```bash
-npm install
-npm run dev                                    # http://localhost:3000
+pnpm install
+pnpm dev                                       # http://localhost:3000
 ```
+
+This project uses **pnpm** (pinned via `packageManager` in `package.json`).
+Don't run `npm install` here — it would generate a second, divergent lockfile
+alongside `pnpm-lock.yaml`.
 
 Enter `sample` and press Connect. `sample` streams the offline fixture (58
 laps, no network). A numeric key such as `9904` replays a finished race from
