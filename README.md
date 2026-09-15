@@ -17,8 +17,9 @@ same pipeline.
 
 | | |
 |---|---|
-| Dashboard | _deployed URL_ |
-| API health | _deployed URL_`/health` |
+| Dashboard | _not yet deployed_ |
+| API | https://f1-pit-strategy.onrender.com |
+| Health | https://f1-pit-strategy.onrender.com/health |
 
 - **replay** + `sample` — offline fixture, 58 laps, no network
 - **replay** + `9904` — 2025 Azerbaijan GP
@@ -104,8 +105,9 @@ a plain `ws://` connection.
 builds from `backend/Dockerfile` rather than the Python buildpack. Set
 `F1_ALLOWED_ORIGINS` to the frontend URL.
 
-**Frontend → Vercel.** Import the repo, Root Directory `frontend`, set
-`NEXT_PUBLIC_BACKEND_WS_URL` to the Render URL.
+**Frontend → Vercel.** Import the repo, Root Directory `frontend`. The
+backend URL is already set in `frontend/.env.production`, so no dashboard
+configuration is needed.
 
 > Render's free tier spins down after 15 minutes idle, with a 30–60 second cold
 > start. Hit `/health` a few minutes before a live session.

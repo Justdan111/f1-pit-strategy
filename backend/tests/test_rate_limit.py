@@ -137,7 +137,7 @@ async def test_poll_loop_request_rate_stays_inside_the_per_minute_budget(
     per_minute = len(polling_calls) / minutes
 
     assert per_minute <= 30, f"{per_minute:.1f} req/min exceeds the 30/min tier"
-    # And confirm the margin DAY4.md asks for, not just bare compliance.
+    # Confirm real margin, not just bare compliance.
     assert per_minute <= 20, (
         f"{per_minute:.1f} req/min leaves too little margin under the 30/min limit"
     )

@@ -17,3 +17,10 @@ venv/
 
 # macOS
 .DS_Store
+
+# Personal planning docs: kept locally, not published.
+# docs/ENGINEERING.md and the demo images ARE tracked — the README links them.
+docs/DAY*.md
+docs/DAY*.MD
+docs/PROJECT.md
+docs/SPEC.md
