@@ -1,43 +1,19 @@
-"""Thin async client for the OpenF1 REST API (https://openf1.org).
-
-Scope today (Day 1): fetch stints for a session_key. That's all replay mode
-needs. Day 4 will add the session-window lookups live mode needs, plus an
-explicit rate limiter — OpenF1's free tier is roughly 3 req/s and 30 req/min
-(SPEC section 10), and blowing through that mid-race is the worst possible
-failure for the primary use case. One request per replay connection is
-comfortably under it, so no limiter today; the note is here so Day 4 doesn't
-"discover" the requirement late.
-
-Design notes:
-
-- The client does not own its httpx.AsyncClient. It is passed one. That keeps
-  connection-pool lifetime a decision for the application (see main.py's
-  lifespan), so we aren't opening a fresh TCP connection and TLS handshake
-  per WebSocket connection, and so tests can inject a mock transport.
-
-- Every failure mode becomes a specific, named exception. SPEC section 7.1:
-  "fails loudly and specifically on unreachable API, bad session_key, or
-  unexpected response shape." A caller can then map each to a sensible
-  `error` envelope instead of showing the user a stack trace.
-
-- Rows that don't validate are dropped, not fatal. If OpenF1 returns 40 good
-  stints and one with a null lap_end (it happens — a car that retired), a
-  hard failure would make the whole race unusable. We skip the bad row and
-  carry on. The one thing we refuse to do is *guess* at a missing value.
-"""
+"""Async client for the OpenF1 REST API (https://openf1.org)."""
 
 import asyncio
 import logging
 import time
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TypeVar
 
 import httpx
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from .config import Settings
 from .models import Lap, Session, Stint
 
 logger = logging.getLogger(__name__)
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 class OpenF1Error(Exception):
@@ -47,7 +23,7 @@ class OpenF1Error(Exception):
 
 
 class OpenF1Unavailable(OpenF1Error):
-    """Could not reach OpenF1, or it returned a server error / timed out."""
+    """Could not reach OpenF1, or it returned a server error or timed out."""
 
     code = "openf1_unavailable"
 
@@ -59,13 +35,7 @@ class OpenF1BadResponse(OpenF1Error):
 
 
 class OpenF1RateLimited(OpenF1Error):
-    """OpenF1 returned 429. We asked for too much, too fast.
-
-    Separate from OpenF1Unavailable because the remedy is different and the
-    blame is ours: unavailable means wait for someone else to fix something,
-    rate-limited means back off and reduce our own request rate. Live mode
-    must distinguish them to respond correctly (SPEC section 10).
-    """
+    """OpenF1 returned 429. Distinct from unavailable: the remedy is to slow down."""
 
     code = "openf1_rate_limited"
 
@@ -75,20 +45,13 @@ class OpenF1RateLimited(OpenF1Error):
 
 
 class RateLimiter:
-    """Enforces a minimum gap between requests, process-wide.
+    """Enforces a minimum gap between requests.
 
-    OpenF1's free tier is roughly 3 req/s and 30 req/min, and the API
-    advertises no rate-limit headers (verified 2026-09-14: no X-RateLimit-*
-    or Retry-After on a normal response). So there is nothing to react to —
-    compliance has to be enforced on our side, before the request goes out.
+    OpenF1 advertises no rate-limit headers, so there is nothing to react to:
+    compliance is enforced before the request goes out. Not a token bucket,
+    because bursts are exactly what must not be allowed.
 
-    Deliberately simple: one lock, one timestamp, and a sleep. Not a token
-    bucket, because bursts are exactly what we must not allow.
-
-    `clock` and `sleep` are injected rather than hardcoded to
-    time.monotonic / asyncio.sleep, purely so the rate-limit compliance test
-    can drive virtual time and assert the spacing without the suite taking
-    real seconds to run. Production passes neither and gets the real ones.
+    `clock` and `sleep` are injected so tests can drive virtual time.
     """
 
     def __init__(
@@ -106,9 +69,8 @@ class RateLimiter:
 
     async def acquire(self) -> None:
         """Block until it is safe to make another request."""
-        # The lock matters: without it two coroutines could both read the
-        # same `_last_request_at`, both decide no wait is needed, and fire
-        # simultaneously — breaching the limit precisely when load is high.
+        # The lock prevents two coroutines both reading the same timestamp,
+        # both deciding no wait is needed, and firing simultaneously.
         async with self._lock:
             now = self._clock()
             if self._last_request_at is not None:
@@ -121,7 +83,7 @@ class RateLimiter:
 
 
 class OpenF1Client:
-    """Async wrapper over the OpenF1 endpoints this project uses."""
+    """HTTP in, validated models out. Makes no judgement about what the data means."""
 
     def __init__(
         self,
@@ -133,28 +95,17 @@ class OpenF1Client:
         self._http = http
         self._base_url = settings.openf1_base_url.rstrip("/")
         self._timeout = settings.openf1_timeout_seconds
-        # One limiter for the whole client, so the budget is shared across
-        # endpoints. A per-endpoint limiter would let /stints and /laps each
-        # run at the full rate and jointly double it.
+        # One limiter for the whole client: a per-endpoint limiter would let
+        # each endpoint run at the full rate and jointly double it.
         self._rate_limiter = rate_limiter or RateLimiter(
             settings.openf1_min_request_interval_seconds
         )
 
     async def _get(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
-        """GET one OpenF1 endpoint and return its rows.
-
-        OpenF1 returns a JSON array at the top level for these endpoints.
-        Anything else is treated as an unexpected shape rather than being
-        coerced, because quietly accepting a surprise here would push the
-        confusion downstream into the replay logic.
-        """
         url = f"{self._base_url}/{path.lstrip('/')}"
-
-        # Drop None params so callers can pass optional filters unconditionally.
         clean = {k: v for k, v in params.items() if v is not None}
 
-        # Every request goes through the limiter, with no bypass. A bypass
-        # for "just this one quick call" is how rate limits get breached.
+        # No bypass: "just this one quick call" is how rate limits get breached.
         await self._rate_limiter.acquire()
 
         try:
@@ -167,9 +118,6 @@ class OpenF1Client:
             raise OpenF1Unavailable(f"Could not reach OpenF1 at {url}: {exc}") from exc
 
         if response.status_code == 429:
-            # Retry-After is optional and OpenF1 does not currently send it,
-            # but honour it when present rather than assuming our own backoff
-            # is more informed than the server's instruction.
             retry_after = response.headers.get("Retry-After")
             try:
                 retry_seconds = float(retry_after) if retry_after else None
@@ -181,20 +129,17 @@ class OpenF1Client:
                 retry_after_seconds=retry_seconds,
             )
 
+        # API quirk: a query matching nothing returns 404, not 200 []. That is
+        # an empty result, not a rejected request.
+        if response.status_code == 404 and "No results found" in response.text:
+            logger.info("OpenF1 has no results for %s with params %r", path, clean)
+            return []
+
         if response.status_code >= 500:
             raise OpenF1Unavailable(
                 f"OpenF1 returned {response.status_code} for {path}. "
                 "The API is having problems; this is not a problem with the request."
             )
-        # API quirk, confirmed against the real API: OpenF1 answers a query
-        # that simply matched nothing with 404 {"detail": "No results found."}
-        # rather than 200 []. That is not a rejected request, it is an empty
-        # result, so we normalise it to an empty list and let the caller
-        # decide what "no data" means. Any other 404 is a real problem.
-        if response.status_code == 404 and "No results found" in response.text:
-            logger.info("OpenF1 has no results for %s with params %r", path, clean)
-            return []
-
         if response.status_code >= 400:
             raise OpenF1BadResponse(
                 f"OpenF1 rejected the request to {path} with "
@@ -220,38 +165,26 @@ class OpenF1Client:
         session_key: str,
         driver_number: int | None = None,
     ) -> list[Stint]:
-        """Fetch stints for a session, optionally narrowed to one driver.
-
-        Returns every stint OpenF1 knows about for that session, in the order
-        it gave them. Filtering to a single driver and ordering by lap is
-        ReplayTickSource's job, not the client's — the client's only
-        responsibility is "HTTP in, validated models out".
-        """
+        """Fetch stints. Unparseable rows are dropped, not fatal: one retirement
+        must not make the other nineteen drivers unusable."""
         rows = await self._get(
             "stints",
             {"session_key": session_key, "driver_number": driver_number},
         )
+        return self._parse(rows, Stint, "stint", session_key)
 
-        stints: list[Stint] = []
-        skipped = 0
-        for row in rows:
-            try:
-                stints.append(Stint.model_validate(row))
-            except ValidationError:
-                # Usually a null lap_end (a car still running, or retired
-                # mid-stint). Not fatal for the rest of the session.
-                skipped += 1
-                logger.warning("Skipping unparseable stint row: %r", row)
-
-        if skipped:
-            logger.warning(
-                "Dropped %d of %d stint rows for session_key=%s",
-                skipped,
-                len(rows),
-                session_key,
-            )
-
-        return stints
+    async def get_laps(
+        self,
+        session_key: str,
+        driver_number: int | None = None,
+    ) -> list[Lap]:
+        """Fetch per-lap timing. Laps with a null duration are kept: the lap is
+        still real, it just cannot feed the fit."""
+        rows = await self._get(
+            "laps",
+            {"session_key": session_key, "driver_number": driver_number},
+        )
+        return self._parse(rows, Lap, "lap", session_key)
 
     async def get_sessions(
         self,
@@ -260,16 +193,11 @@ class OpenF1Client:
         year: int | None = None,
         country_name: str | None = None,
     ) -> list[Session]:
-        """Fetch session metadata.
+        """Fetch session metadata. `session_key="latest"` is OpenF1's shortcut
+        for the most recent or currently-running session.
 
-        `session_key="latest"` is OpenF1's shortcut for the most recent or
-        currently-running session, and is how live mode asks "is anything
-        happening?" without knowing a key in advance.
-
-        Note what this does NOT do: it makes no judgement about whether a
-        session is live. That is the live window's job, in live.py, where it
-        can be unit-tested against a mocked clock. Keeping the decision out
-        of the HTTP layer is what makes it testable without a network.
+        Makes no judgement about whether a session is live; that is the live
+        window's job, where it can be tested against a mocked clock.
         """
         rows = await self._get(
             "sessions",
@@ -279,61 +207,30 @@ class OpenF1Client:
                 "country_name": country_name,
             },
         )
+        return self._parse(rows, Session, "session", session_key)
 
-        sessions: list[Session] = []
+    @staticmethod
+    def _parse(
+        rows: list[dict[str, Any]],
+        model: type[ModelT],
+        label: str,
+        session_key: Any,
+    ) -> list[ModelT]:
+        parsed: list[ModelT] = []
         skipped = 0
         for row in rows:
             try:
-                sessions.append(Session.model_validate(row))
-            except ValidationError:
-                # A session row missing date_start or date_end cannot take
-                # part in a live-window decision, so it is dropped rather
-                # than defaulted — a guessed date could report a race live
-                # when it is not.
-                skipped += 1
-                logger.warning("Skipping unparseable session row: %r", row)
-
-        if skipped:
-            logger.warning("Dropped %d of %d session rows", skipped, len(rows))
-
-        return sessions
-
-    async def get_laps(
-        self,
-        session_key: str,
-        driver_number: int | None = None,
-    ) -> list[Lap]:
-        """Fetch per-lap timing for a session, optionally narrowed to one driver.
-
-        Day 2 needs this: stints tell you which tyre was on the car, laps tell
-        you how fast it went. A degradation curve needs both.
-
-        Same contract as get_stints — HTTP in, validated models out. Laps with
-        a null lap_duration are returned as-is rather than dropped: the tick
-        for that lap is still real and still belongs in the stream, it just
-        can't contribute a data point to the fit. Deciding what to do about a
-        missing lap time is the decision engine's call, not the client's.
-        """
-        rows = await self._get(
-            "laps",
-            {"session_key": session_key, "driver_number": driver_number},
-        )
-
-        laps: list[Lap] = []
-        skipped = 0
-        for row in rows:
-            try:
-                laps.append(Lap.model_validate(row))
+                parsed.append(model.model_validate(row))
             except ValidationError:
                 skipped += 1
-                logger.warning("Skipping unparseable lap row: %r", row)
+                logger.warning("Skipping unparseable %s row: %r", label, row)
 
         if skipped:
             logger.warning(
-                "Dropped %d of %d lap rows for session_key=%s",
+                "Dropped %d of %d %s rows for session_key=%s",
                 skipped,
                 len(rows),
+                label,
                 session_key,
             )
-
-        return laps
+        return parsed

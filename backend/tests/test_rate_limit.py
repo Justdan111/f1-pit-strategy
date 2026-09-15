@@ -1,17 +1,8 @@
-"""Rate-limit compliance.
+"""Rate-limit compliance against OpenF1's ~3 req/s and 30 req/min free tier.
 
-SPEC section 10: "exceeding OpenF1's free-tier limits isn't just bad
-practice, it will get requests rejected mid-session, which is the worst
-possible failure mode for the primary use case."
-
-The free tier is roughly 3 req/s and 30 req/min, and OpenF1 advertises no
-rate-limit headers (verified 2026-09-14: no X-RateLimit-* and no Retry-After
-on a normal response). There is therefore nothing to react to — compliance
-must be enforced before the request leaves, and proven here.
-
-Everything runs on a virtual clock. Asserting real spacing with real sleeps
-would make this test take minutes, so it would end up skipped, so it would
-stop protecting anything.
+OpenF1 advertises no rate-limit headers, so compliance is enforced before the
+request leaves. Everything runs on a virtual clock: real sleeps would make
+this suite slow enough to end up skipped.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -27,12 +18,7 @@ from .conftest import FakeOpenF1Client, utc
 
 
 class VirtualClock:
-    """Time that only moves when something sleeps.
-
-    Serves both a monotonic float (for RateLimiter) and an aware datetime
-    (for LiveTickSource), so one clock drives the whole system under test and
-    the two views cannot drift apart.
-    """
+    """Time that only moves when something sleeps. Serves both a float and a datetime."""
 
     def __init__(self, start: datetime) -> None:
         self.start = start
@@ -103,7 +89,7 @@ async def test_limiter_keeps_the_client_under_three_requests_per_second():
 async def test_poll_loop_never_polls_faster_than_the_configured_interval(
     settings, baku_2025_race, stints_one_driver, laps_one_driver
 ):
-    """The headline assertion DAY4.md asks for."""
+    """The poll loop must never beat its configured interval."""
     clock = VirtualClock(baku_2025_race.date_start + timedelta(minutes=10))
     client = FakeOpenF1Client(
         sessions=[baku_2025_race], stints=stints_one_driver, laps=laps_one_driver

@@ -1,17 +1,8 @@
-"""Hand-checked scenarios for the decision engine.
+"""Prints the decision-engine scenarios as a comparison table.
 
-DAY2.md: "a decision engine that runs without crashing but gives bad advice is
-worse than one that visibly fails, since a bad number looks fine until you
-check it by hand."
-
-Every expected value below was computed by hand from the stated line and tyre
-age BEFORE running the engine, and is hardcoded here. If the engine's output
-drifts, this fails. Run:  uv run python scripts/check_decisions.py
-
-SUPERSEDED (Day 4): these scenarios now live in tests/test_decision_engine.py
-and run under pytest with `uv run pytest`. This script is kept because it
-prints the full comparison table, which is useful when working on the engine
-by hand; the pytest version is what CI and regressions rely on.
+The same scenarios run under pytest in tests/test_decision_engine.py, which
+is what CI relies on. This script exists for working on the engine by hand,
+where seeing every expected-vs-actual value at once is useful.
 """
 
 import sys

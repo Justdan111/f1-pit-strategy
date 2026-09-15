@@ -1,26 +1,6 @@
-"""LiveTickSource — the second implementation of TickSource.
+"""LiveTickSource: polls OpenF1 during a live session and emits newly-completed laps."""
 
-This is the project's primary aim (PROJECT.md): streaming a genuinely live F1
-session as it happens. It is a sibling of ReplayTickSource, behind the same
-interface, and nothing downstream of TickSource changes to accommodate it.
-
-What it does, in order:
-
-1. Work out whether a session is live RIGHT NOW, from /v1/sessions and the
-   clock. If not, say so specifically — that is the normal case.
-2. While the session's live window is open, poll /v1/stints and /v1/laps on
-   an interval with real margin under the free-tier rate limit.
-3. Emit only laps not already sent, so a poll that sees nothing new sends
-   nothing rather than re-sending the race so far.
-
-Honest limits (DAY4.md). There is no live session until practice starts on
-2026-09-24, so step 2's behaviour against genuinely arriving laps cannot be
-proven today. What IS provable today, and is tested: the window arithmetic in
-`live_window` / `is_session_live` against real session metadata with a mocked
-clock; rate-limit compliance; error handling; and that the ticks produced are
-the same shape ReplayTickSource produces. Everything else waits for the 24th.
-"""
-
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Awaitable, Callable
@@ -33,17 +13,12 @@ from .tick_source import TickSource, TickSourceError
 
 logger = logging.getLogger(__name__)
 
-# OpenF1's shortcut for "the most recent or currently-running session".
+# OpenF1's shortcut for the most recent or currently-running session.
 LATEST_SESSION_KEY = "latest"
 
 
 class NoLiveSessionError(TickSourceError):
-    """No F1 session is running right now.
-
-    An expected state, not a malfunction (SPEC section 10), so it carries the
-    next session when one is known and is rendered by the WebSocket layer as
-    a dedicated `no_live_session` message rather than an `error`.
-    """
+    """No session is running. Expected, not a malfunction."""
 
     code = "no_live_session"
 
@@ -59,24 +34,15 @@ class NoLiveSessionError(TickSourceError):
         self.checked_at = checked_at or datetime.now(timezone.utc)
 
 
-# --- the live window: pure functions, no I/O, no clock of their own --------
-#
-# Kept free of HTTP calls and of datetime.now() on purpose. `now` is a
-# parameter, so the whole definition of "live" can be tested against real
-# session metadata at any instant we choose, including the exact boundaries.
-# If these functions read the clock themselves, the only way to test the
-# boundaries would be to wait for a race.
+# `now` is a parameter, not a call to datetime.now(), so the definition of
+# "live" can be tested at any instant including the exact boundaries.
 
 
 def live_window(
     session: Session,
     margin_minutes: int,
 ) -> tuple[datetime, datetime]:
-    """The interval during which OpenF1 serves live data for a session.
-
-    30 minutes before the scheduled start to 30 minutes after the scheduled
-    end (PROJECT.md, confirmed against OpenF1's documentation).
-    """
+    """The interval during which OpenF1 serves live data for a session."""
     margin = timedelta(minutes=margin_minutes)
     return session.date_start - margin, session.date_end + margin
 
@@ -86,20 +52,7 @@ def is_session_live(
     now: datetime,
     margin_minutes: int,
 ) -> bool:
-    """Is this session live at `now`?
-
-    Boundaries are INCLUSIVE: exactly 30 minutes before the start counts as
-    live, and so does exactly 30 minutes after the end. Stating that here
-    rather than leaving it to `<` versus `<=` is the point — the tests assert
-    both edges, and an off-by-one at an edge is precisely the bug that would
-    otherwise surface for the first time during a real session.
-
-    A cancelled session is never live, regardless of its scheduled times.
-
-    `now` must be timezone-aware. A naive datetime raises on comparison with
-    OpenF1's aware timestamps, and the explicit check below turns that into a
-    readable message rather than a bare TypeError from deep in the stdlib.
-    """
+    """Is this session live at `now`? Boundaries are inclusive at both ends."""
     if now.tzinfo is None:
         raise ValueError(
             "is_session_live() requires a timezone-aware `now`; "
@@ -118,14 +71,12 @@ def next_session_after(
     now: datetime,
 ) -> Session | None:
     """The soonest session that has not started yet, or None."""
-    upcoming = [
-        s for s in sessions if not s.is_cancelled and s.date_start > now
-    ]
+    upcoming = [s for s in sessions if not s.is_cancelled and s.date_start > now]
     return min(upcoming, key=lambda s: s.date_start) if upcoming else None
 
 
 class LiveTickSource(TickSource):
-    """Polls OpenF1 during a live session and emits newly-completed laps."""
+    """Polls OpenF1 while a session's live window is open."""
 
     def __init__(
         self,
@@ -142,33 +93,24 @@ class LiveTickSource(TickSource):
         self._requested_driver = driver_number
         self._settings = settings or get_settings()
 
-        # Injected for the same reason as in RateLimiter: the tests need to
-        # control time. Production passes neither.
+        # Injected so tests can control time.
         self._clock = clock or (lambda: datetime.now(timezone.utc))
-        if sleep is None:
-            import asyncio
-
-            self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
-        else:
-            self._sleep = sleep
+        self._sleep: Callable[[float], Awaitable[None]] = sleep or asyncio.sleep
 
         self._session: Session | None = None
         self._driver_number: int | None = None
-        # Laps already sent to this client. Per connection, so a reconnect
-        # correctly replays the race so far rather than starting mid-stream.
+        # Per connection, so a reconnect replays the race so far.
         self._emitted_laps: set[int] = set()
         self._opened = False
 
-    # --- TickSource contract ---------------------------------------------
-
     @property
     def session_key(self) -> str:
-        return str(self._session.session_key) if self._session else self._requested_session_key
+        if self._session:
+            return str(self._session.session_key)
+        return self._requested_session_key
 
     @property
     def source(self) -> str:
-        # Always "live", and only ever set here. A replayed historical race
-        # must never report this value however live it looks.
         return "live"
 
     async def open(self) -> StartMessage:
@@ -181,9 +123,7 @@ class LiveTickSource(TickSource):
 
         self._session = session
         self._opened = True
-        opens, closes = live_window(
-            session, self._settings.live_window_margin_minutes
-        )
+        opens, closes = live_window(session, self._settings.live_window_margin_minutes)
         logger.info(
             "Live session detected: %s (session_key=%s), window %s to %s, "
             "polling every %.1fs",
@@ -197,12 +137,8 @@ class LiveTickSource(TickSource):
         return StartMessage(
             session_key=str(session.session_key),
             source="live",
-            # None, always. A race in progress has no known total — this is
-            # the field where live and replay legitimately differ, and the
-            # frontend already handles it (Day 3).
+            # Always None: a race in progress has no known total.
             total_laps=None,
-            # Unknown until the first poll returns stints; a session can be
-            # live before any car has completed a lap.
             driver_number=self._requested_driver,
         )
 
@@ -256,9 +192,7 @@ class LiveTickSource(TickSource):
                 backoff = min(backoff * 2, self._settings.live_backoff_max_seconds)
                 continue
 
-            # A successful poll resets both counters. Transient failures must
-            # not accumulate across minutes of healthy polling into a
-            # spurious give-up.
+            # Transient failures must not accumulate across healthy polling.
             consecutive_failures = 0
             backoff = self._settings.live_backoff_initial_seconds
 
@@ -280,10 +214,7 @@ class LiveTickSource(TickSource):
 
             await self._sleep(self._settings.live_poll_interval_seconds)
 
-    # --- internals --------------------------------------------------------
-
     async def _resolve_session(self, now: datetime) -> Session:
-        """Fetch the session this connection is about."""
         sessions = await self._client.get_sessions(
             session_key=self._requested_session_key
         )
@@ -298,16 +229,12 @@ class LiveTickSource(TickSource):
     async def _no_live_session(
         self, session: Session, now: datetime
     ) -> NoLiveSessionError:
-        """Build the 'nothing live right now' answer, with the next session.
+        """Build the 'nothing live' answer, with the next session when known.
 
-        Looking up what's next costs one extra request and turns a bare "no"
-        into something actionable. If that lookup fails we still answer — a
-        failure to find the next session must not turn the expected case into
-        an error.
+        A failed lookup of what is next must not turn the expected case into
+        an error, so it degrades to a bare answer.
         """
-        opens, closes = live_window(
-            session, self._settings.live_window_margin_minutes
-        )
+        opens, closes = live_window(session, self._settings.live_window_margin_minutes)
         upcoming: Session | None = None
         try:
             candidates = await self._client.get_sessions(year=now.year)
@@ -331,9 +258,7 @@ class LiveTickSource(TickSource):
 
         detail = f"No live session right now. {why}"
         if upcoming is not None:
-            detail += (
-                f" Next up: {upcoming.label} at {upcoming.date_start.isoformat()}."
-            )
+            detail += f" Next up: {upcoming.label} at {upcoming.date_start.isoformat()}."
 
         return NoLiveSessionError(detail, next_session=upcoming, checked_at=now)
 
@@ -343,48 +268,30 @@ class LiveTickSource(TickSource):
 
         stints: list[Stint] = await self._client.get_stints(session_key)
         if not stints:
-            # Entirely normal early in a session: the lights are out but no
-            # car has completed a lap, so there are no stints yet.
+            # Normal early on: the session is live but no lap is complete.
             return []
 
         if self._driver_number is None:
-            # Resolved once, on the first poll that returns data, and then
-            # fixed. Re-resolving every poll could switch cars mid-race as
-            # the "most laps" leader changes.
+            # Resolved once and then fixed, so the stream cannot switch cars.
             self._driver_number = resolve_driver(
                 stints, self._requested_driver, session_key
             )
             logger.info("Live stream following driver %s", self._driver_number)
 
-        laps: list[Lap] = await self._client.get_laps(
-            session_key, self._driver_number
-        )
+        laps: list[Lap] = await self._client.get_laps(session_key, self._driver_number)
 
         driver_stints = [s for s in stints if s.driver_number == self._driver_number]
         all_ticks = flatten_to_ticks(driver_stints, laps)
         return self._select_new(all_ticks)
 
     def _select_new(self, ticks: list[TickMessage]) -> list[TickMessage]:
-        """Which of these laps should be sent now.
+        """Which laps to send now.
 
-        Two rules:
-
-        1. Never re-send a lap already emitted. This is what makes a poll
-           that sees nothing new emit nothing, instead of the whole race
-           again every ten seconds.
-
-        2. Hold back the newest lap while it has no lap time.
-
-        Rule 2 is the live-specific one and it matters. A lap appears in
-        /v1/laps as soon as the car crosses the line to START it, with
-        lap_duration null until it finishes. Emitting immediately would send
-        a tick whose lap time is permanently null — because we would never
-        send that lap again under rule 1 — and the decision engine would
-        silently lose a sample from every single lap of the race.
-
-        So a lap is held until either its duration arrives, or a higher lap
-        number appears (which proves the earlier lap is over and its missing
-        duration is genuinely absent rather than pending).
+        Never re-send an emitted lap, and hold back the newest lap while it has
+        no lap time. A lap appears in /v1/laps when the car STARTS it, with a
+        null duration; emitting immediately would send a tick whose lap time is
+        permanently null, since it would never be sent again. Released once a
+        duration arrives or a higher lap proves the earlier one is over.
         """
         if not ticks:
             return []

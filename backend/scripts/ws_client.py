@@ -1,19 +1,12 @@
-"""A terminal WebSocket client, so you can watch the stream yourself.
+"""Terminal WebSocket client, since curl cannot speak WebSocket.
 
-curl can't speak WebSocket, so this is the equivalent. It connects, prints
-every message as it arrives with the elapsed time since connecting, and
-validates each one against the protocol models — so if the server ever sends
-something off-spec, this tells you rather than silently printing it.
-
-Usage (from backend/):
+Prints every message with the elapsed time since connecting and validates it
+against the protocol models. If ticks all show the same timestamp, it is not
+streaming.
 
     uv run python scripts/ws_client.py
-    uv run python scripts/ws_client.py --session-key sample --tick-interval 0.1
-    uv run python scripts/ws_client.py --session-key 9222 --mode replay
-    uv run python scripts/ws_client.py --mode live          # expect an error envelope
-
-The elapsed-time column is the point: if ticks all show the same timestamp,
-you built a list, not a stream.
+    uv run python scripts/ws_client.py --session-key 9904 --driver-number 1
+    uv run python scripts/ws_client.py --session-key latest --mode live
 """
 
 import argparse
@@ -65,8 +58,7 @@ async def run(args: argparse.Namespace) -> int:
                 counts[kind] = counts.get(kind, 0) + 1
 
                 if kind == "decision" and not args.raw:
-                    # Decisions carry a dozen fields; printing them raw makes
-                    # the stream unreadable. Show the ones that drive the call.
+                    # Show only the fields that drive the call; --raw for all.
                     d = rendered
                     be = d["laps_to_break_even"]
                     be_txt = f"{be:>5.1f} laps" if be is not None else "     n/a  "

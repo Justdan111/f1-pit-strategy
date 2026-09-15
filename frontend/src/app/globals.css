@@ -1,6 +1,5 @@
-/* Plain CSS, no framework. DAY3.md: "no visual polish beyond clear and
-   correct" — the states have to be distinguishable at a glance and the
-   numbers have to be readable. That is the whole brief. */
+/* Plain CSS, no framework. States must be distinguishable at a glance and
+   the numbers readable. */
 
 :root {
   --bg: #12141a;
@@ -80,7 +79,6 @@ code { font-family: var(--mono); font-size: 0.9em; }
 }
 .connect button[type="submit"] { background: var(--ended); border-color: var(--ended); }
 .connect button:disabled { opacity: 0.4; cursor: not-allowed; }
-/* The disabled `live` option must read as unavailable, not merely unselected. */
 .connect select option:disabled { color: var(--muted); font-style: italic; }
 .hint { flex-basis: 100%; margin: 0; font-size: 13px; color: var(--muted); }
 

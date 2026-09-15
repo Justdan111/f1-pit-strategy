@@ -1,16 +1,8 @@
 """The TickSource contract test.
 
-DAY4.md: "this is what actually proves the Day 1 abstraction paid off."
-
-The claim being tested is not "both classes have the right method names" —
-that is trivially true and worth almost nothing. It is the claim the whole
-project rests on: that the decision engine and the frontend cannot tell which
-implementation produced a tick. If a live tick differs from a replay tick in
-any field, Day 2's engine and Day 3's dashboard silently behave differently
-in the mode that matters most, and would only reveal it during a real race.
-
-So the tests below run BOTH implementations through the same assertions and
-compare their output field by field.
+The claim is not that both classes have the right method names, but that
+nothing downstream can tell which implementation produced a tick. Both are
+run over the same data and their output compared field by field.
 """
 
 from datetime import timedelta
@@ -52,12 +44,7 @@ def _replay_source(settings, stints, laps):
 
 
 def _live_source(settings, session, stints, laps, *, poll_calls=3):
-    """A LiveTickSource with time and network faked.
-
-    The clock advances by the poll interval on each read, so the live window
-    eventually closes and `ticks()` terminates — otherwise a live stream
-    would, correctly, never end on its own.
-    """
+    """LiveTickSource with time and network faked. The clock eventually closes the window."""
     client = FakeOpenF1Client(sessions=[session], stints=stints, laps=laps)
     times = iter_clock(session, settings, poll_calls)
 
@@ -101,12 +88,7 @@ def test_both_implement_the_interface(implementation):
 async def test_both_sources_emit_identical_tick_shapes(
     settings, baku_2025_race, stints_one_driver, laps_one_driver
 ):
-    """Every field, on every tick, from both implementations.
-
-    Not a shape check against a schema — an equality check between the two
-    implementations given the same underlying race data. They must produce
-    the same ticks, not merely similar ones.
-    """
+    """An equality check between implementations, not a shape check against a schema."""
     replay = _replay_source(settings, stints_one_driver, laps_one_driver)
     await replay.open()
     replay_ticks = [t async for t in replay.ticks()]
@@ -150,12 +132,7 @@ async def test_both_sources_produce_tick_messages(
 async def test_start_messages_differ_only_where_they_must(
     settings, baku_2025_race, stints_one_driver, laps_one_driver
 ):
-    """`source` and `total_laps` are the only legitimate differences.
-
-    SPEC section 8: total_laps is None in live mode because a race in
-    progress has no known total. Everything else about the envelope is the
-    same, so the frontend needs no mode-specific branch.
-    """
+    """total_laps is None in live mode; everything else must match."""
     replay = _replay_source(settings, stints_one_driver, laps_one_driver)
     replay_start = await replay.open()
 
@@ -175,12 +152,7 @@ async def test_start_messages_differ_only_where_they_must(
 async def test_decision_engine_is_indifferent_to_the_source(
     settings, baku_2025_race, stints_one_driver, laps_one_driver
 ):
-    """DAY4.md: confirm, don't assume, that Day 2's engine holds for live ticks.
-
-    The same engine, fed from each source, must reach the same conclusions —
-    including the "not enough data yet" skips. This is the property that lets
-    live mode reuse the decision engine unmodified.
-    """
+    """The same engine, fed from each source, must reach the same conclusions."""
     replay = _replay_source(settings, stints_one_driver, laps_one_driver)
     await replay.open()
     replay_engine = DecisionEngine(settings)
@@ -212,7 +184,7 @@ async def _decisions(engine, source):
 async def test_engine_skips_cleanly_on_live_ticks_with_too_little_data(
     settings, baku_2025_race
 ):
-    """Day 2's skip behaviour, exercised through LiveTickSource specifically."""
+    """Skip behaviour, exercised through LiveTickSource specifically."""
     from backend.models import Lap, Stint
 
     stints = [

@@ -3,20 +3,7 @@
 import { useState } from "react";
 import { Mode } from "@/lib/types";
 
-/**
- * session_key text input + mode selector + Connect/Disconnect.
- *
- * A plain text input, per DAY3.md — a race browser against /v1/sessions is
- * explicitly out of scope.
- *
- * The `live` option is enabled as of Day 4, now that LiveTickSource exists.
- * It was deliberately disabled before that, because an enabled toggle would
- * have promised something the backend could not do.
- *
- * Enabling it required no change to the connection layer: Day 3 passed
- * `mode` through generically rather than hardcoding "replay", so this is the
- * one-line change it was designed to be.
- */
+/** session_key input, mode selector, and connect/disconnect controls. */
 export function ConnectForm({
   onConnect,
   onDisconnect,

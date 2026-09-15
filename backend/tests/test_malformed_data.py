@@ -1,13 +1,8 @@
 """Malformed and partial OpenF1 data must degrade, not crash.
 
-DAY4.md hardening: "malformed or partially missing data from OpenF1 (either
-endpoint) should degrade gracefully — skip the bad record, don't crash the
-stream."
-
-This matters more in live mode than replay. Live data is mid-flight: a lap
-exists before it has a duration, a stint can be briefly inconsistent, and a
-retirement leaves records half-written. A stream that dies on one bad row
-dies during the race, which is the only time it matters.
+Live data is mid-flight: a lap exists before it has a duration, a stint can
+be briefly inconsistent, a retirement leaves records half-written. A stream
+that dies on one bad row dies during the race.
 """
 
 import httpx
@@ -61,11 +56,7 @@ def test_stint_with_inverted_lap_range_is_skipped_not_fatal():
 
 
 def test_absurd_lap_end_is_skipped_rather_than_expanded():
-    """A corrupt lap_end must not allocate a hundred thousand ticks.
-
-    Without the cap this is a malformed-data bug that presents as an
-    out-of-memory outage rather than as bad data.
-    """
+    """A corrupt lap_end must not allocate a hundred thousand ticks."""
     stints = [Stint(driver_number=1, stint_number=1, lap_start=1,
                     lap_end=100_000, compound="HARD", tyre_age_at_start=0)]
     assert flatten_to_ticks(stints, []) == []
@@ -137,11 +128,7 @@ async def test_json_object_instead_of_array_raises(settings):
 
 
 async def test_404_no_results_is_an_empty_list_not_an_error(settings):
-    """OpenF1's real behaviour: an empty match returns 404, not 200 [].
-
-    Verified against the live API. That is an empty result, not a rejected
-    request, so it must not surface as a failure.
-    """
+    """OpenF1 returns 404 for an empty match: an empty result, not a failure."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"detail": "No results found."})
 
@@ -175,11 +162,7 @@ async def test_timeout_is_reported_as_unavailable(settings):
 
 
 async def test_session_row_missing_dates_is_dropped(settings):
-    """A session with no date cannot take part in a live-window decision.
-
-    Dropping it is right: defaulting the date could report a race live when
-    it is not.
-    """
+    """Defaulting a missing date could report a race live when it is not."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[
             {"session_key": 1, "session_name": "Race",

@@ -1,19 +1,8 @@
 import { DecisionMessage } from "@/lib/types";
 
 /**
- * The latest `decision` message, in full.
- *
- * Two things this panel refuses to do:
- *
- * 1. Render a blank/skeleton panel before the first decision. Day 2's engine
- *    needs at least three clean samples of a compound before it can fit
- *    anything, so "no decision yet" is a normal, expected state with a real
- *    reason — and DAY3.md asks for it to be stated, not left looking broken.
- *
- * 2. Show the verdict alone. SPEC section 10 is "explainability over
- *    accuracy": every number behind the call is displayed so a reader can
- *    recompute it and disagree. A verdict with no arithmetic is exactly the
- *    thing that looks authoritative while being unverifiable.
+ * The latest decision in full. Never renders a blank panel before the first
+ * one, and never shows the verdict without the numbers behind it.
  */
 
 function Row({

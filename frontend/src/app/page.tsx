@@ -7,15 +7,7 @@ import { StatusBanner } from "@/components/StatusBanner";
 import { Timeline } from "@/components/Timeline";
 import { useRaceStream } from "@/lib/useRaceStream";
 
-/**
- * The single page. DAY3.md: one live view, no landing page, no nav.
- *
- * All stream state lives in one `useRaceStream` hook and is passed down as
- * props. No context, no store library — with exactly one consumer tree and
- * one source of truth, either would be indirection with nothing to gain, and
- * both would make the ordering guarantee harder to reason about rather than
- * easier.
- */
+/** One live view. State lives in one hook and is passed down as props. */
 export default function Page() {
   const { state, connect, disconnect, latestTickLap } = useRaceStream();
   const busy = state.status === "connecting" || state.status === "streaming";
@@ -24,9 +16,7 @@ export default function Page() {
     <main>
       <header className="page-head">
         <h1>F1 Pit Strategy</h1>
-        {/* The badge only appears once the server has told us what it is
-            actually doing. Rendering it from the form's selection before
-            `start` arrives would show a claim we cannot yet support. */}
+        {/* Only once the server has said what it is actually doing. */}
         {state.start && <SourceBadge source={state.start.source} />}
       </header>
 
@@ -34,9 +24,7 @@ export default function Page() {
 
       <StatusBanner state={state} />
 
-      {/* The ordering invariant, surfaced. If this ever renders, the panel
-          and the timeline disagree and that is a real bug, not a display
-          quirk (DAY3.md). Silence here is the check passing. */}
+      {/* If this ever renders, the panel and timeline disagree: a real bug. */}
       {state.orderingViolations > 0 && (
         <div className="banner banner-error">
           <div className="banner-head">

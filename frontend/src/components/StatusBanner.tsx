@@ -1,25 +1,14 @@
 import { ConnectionStatus, RaceStreamState } from "@/lib/useRaceStream";
 
-/**
- * One visible, distinct state for every connection status.
- *
- * DAY3.md: "no blank screen while connecting, no silent failure on error."
- * Every branch below renders something; there is no path that returns null.
- * `ended` and `error` are deliberately given different colours and different
- * wording, because "the race finished" and "something broke" must never look
- * alike at a glance.
- */
+/** One distinct, non-blank state per connection status. */
 const COPY: Record<ConnectionStatus, { title: string; tone: string }> = {
   idle: { title: "Not connected", tone: "idle" },
   connecting: { title: "Connecting…", tone: "connecting" },
-  // Distinct from `connecting` in both word and colour. "Connecting" means
-  // nothing has started; "Reconnecting" means we were streaming and lost it.
-  // Showing the same thing for both would hide a dropped race behind what
-  // looks like a normal startup.
+  // "Connecting" means nothing started; "Reconnecting" means we lost a stream.
   reconnecting: { title: "Reconnecting…", tone: "reconnecting" },
   streaming: { title: "Streaming", tone: "streaming" },
   ended: { title: "Stream ended", tone: "ended" },
-  // Informational, not a failure: live mode spends most of its life here.
+  // Informational, not a failure: live mode is usually in this state.
   no_live_session: { title: "No live session", tone: "info" },
   error: { title: "Error", tone: "error" },
 };
@@ -66,8 +55,6 @@ export function StatusBanner({ state }: { state: RaceStreamState }) {
         </p>
       )}
 
-      {/* Not an error, and deliberately not styled as one. This is the
-          normal answer for live mode outside a race weekend. */}
       {state.status === "no_live_session" && state.noLiveSession && (
         <>
           <p>{state.noLiveSession.detail}</p>
@@ -97,9 +84,7 @@ export function StatusBanner({ state }: { state: RaceStreamState }) {
         </p>
       )}
 
-      {/* "Finished the race" and "you stopped it" are both `ended` — neither
-          is an error — but they must not read alike, so the wording branches
-          on the reason rather than printing one sentence for both. */}
+      {/* Finishing and being stopped are both `ended`, but must not read alike. */}
       {state.status === "ended" && state.end && (
         <p>
           {state.end.reason === "completed"

@@ -1,14 +1,9 @@
 """Live-session detection.
 
-DAY4.md is explicit: do NOT loosen "is this session live" so historical data
-passes, because that validates the wrong thing and hides a real bug if the
-window arithmetic is off. Instead, hold the definition fixed and move the
-CLOCK — testing real session metadata at chosen instants, including the exact
-30-minute boundaries.
-
-That is only possible because `is_session_live` takes `now` as a parameter
-instead of calling datetime.now() itself. If it read the clock internally,
-the only way to test a boundary would be to wait for a race.
+The definition of "live" is held fixed and the CLOCK is moved instead, so
+real session metadata can be tested at any instant including the exact
+30-minute boundaries. Loosening the window to make historical data pass would
+validate the wrong thing.
 """
 
 from datetime import timedelta
@@ -57,23 +52,12 @@ def test_window_is_thirty_minutes_either_side(baku_2025_race):
     ],
 )
 def test_live_window_boundaries(baku_2025_race, when, expected, why):
-    """The boundary cases DAY4.md asks for, at one-second resolution.
-
-    Both edges are inclusive. An off-by-one here is exactly the bug that
-    would otherwise first appear during a real session, which is the one
-    moment it cannot be debugged calmly.
-    """
+    """Both edges inclusive, at one-second resolution."""
     assert is_session_live(baku_2025_race, utc(when), MARGIN) is expected, why
 
 
 def test_a_real_past_session_is_not_live_today(baku_2025_race):
-    """The guard against the temptation DAY4.md warns about.
-
-    If someone later widens the margin to make replay data pass as live, this
-    fails. It is deliberately phrased in terms of the real Baku 2025 race and
-    a plausible "today", because that is precisely the shortcut that would be
-    taken to get a green test before the 24th.
-    """
+    """Fails if anyone widens the margin to make replay data pass as live."""
     assert not is_session_live(baku_2025_race, utc("2026-09-14T12:00:00+00:00"), MARGIN)
 
 
@@ -85,10 +69,7 @@ def test_upcoming_azerbaijan_2026_is_not_live_yet(baku_2026_practice_1):
 
 
 def test_upcoming_azerbaijan_2026_goes_live_on_the_day(baku_2026_practice_1):
-    """...and IS live inside its real window on 2026-09-24.
-
-    FP1 runs 08:30-09:30 UTC, so live data opens at 08:00.
-    """
+    """FP1 runs 08:30-09:30 UTC, so live data opens at 08:00."""
     assert is_session_live(
         baku_2026_practice_1, utc("2026-09-24T08:00:00+00:00"), MARGIN
     )
@@ -143,11 +124,7 @@ def test_next_session_is_none_when_nothing_is_scheduled(baku_2025_race):
 async def test_open_reports_no_live_session_with_the_next_one(
     settings, baku_2025_race, baku_2026_practice_1
 ):
-    """The state that will be true every time this is run before the 24th.
-
-    It must be a NoLiveSessionError carrying the next session — not a generic
-    failure — and the message must be specific enough to act on.
-    """
+    """Must be a NoLiveSessionError carrying the next session, not a generic failure."""
     client = FakeOpenF1Client(sessions=[baku_2025_race, baku_2026_practice_1])
     source = LiveTickSource(
         client=client,
@@ -168,11 +145,7 @@ async def test_open_reports_no_live_session_with_the_next_one(
 
 
 async def test_open_succeeds_inside_a_real_window(settings, baku_2025_race):
-    """Same code path, clock moved inside the real Baku 2025 window.
-
-    Note what is NOT relaxed to make this pass: the margin is the production
-    30 minutes and the session is the genuine one. Only `now` changes.
-    """
+    """Production margin, genuine session. Only `now` changes."""
     client = FakeOpenF1Client(sessions=[baku_2025_race])
     source = LiveTickSource(
         client=client,
@@ -200,7 +173,7 @@ async def test_open_when_openf1_knows_no_such_session(settings):
 
 
 async def test_next_session_lookup_failure_still_answers(settings, baku_2025_race):
-    """A failed 'what's next' lookup must not turn the expected case into an error."""
+    """A failed lookup must not turn the expected case into an error."""
     from backend.openf1_client import OpenF1Unavailable
 
     class FlakyLookup(FakeOpenF1Client):

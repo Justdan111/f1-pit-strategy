@@ -1,77 +1,23 @@
-"""The pit/stay decision engine.
+"""The pit/stay decision engine. One instance per connection.
 
-One instance per WebSocket connection. It is fed ticks in order, and after
-each one either returns a DecisionMessage or None (not enough data yet).
-
-Three properties it must have, in order of how easy they are to break:
-
-1. INCREMENTAL. It may only ever use ticks it has already been handed. It
-   never sees the race in advance, never looks ahead, and holds no state that
-   outlives the connection. This is not a stylistic preference — it is what
-   lets the same engine serve LiveTickSource on Day 4 without modification.
-   A live race has no future to peek at, so an engine that peeks would work
-   in replay and silently mislead in live mode.
-
-2. MODE-BLIND. Nothing here imports ReplayTickSource, checks `source`, or
-   knows what a fixture is. It consumes TickMessage.
-
-3. EXPLAINABLE. Every number behind the verdict is emitted. A reader should
-   be able to recompute the verdict by hand and disagree with it.
-
-
-The maths, in full
-------------------
 Fit lap time as a straight line in tyre age, per compound:
 
-    lap_time(age) = b + m * age          (m = degradation, seconds per lap)
+    lap_time(age) = b + m * age
 
-Given the car is currently on a set of age A, compare the next lap:
+For a set of age A, comparing the next lap:
 
     stay out:  b + m*(A + 1)
-    pit now:   b + m*1        + pit_cost      (fresh set, read at age 1)
+    pit now:   b + m*1 + pit_cost
+    delta   :  m*A - pit_cost
 
-    delta = stay - pit = m*A - pit_cost
-
-So the one-lap verdict is "pit" exactly when m*A > pit_cost. With a 22-second
-pit cost that needs the tyre to be losing 22 seconds per lap, which no real
-tyre approaches — the one-lap rule says "stay out" essentially always. That
-is a true property of the rule DAY2.md specifies, not a bug in this code, and
-it is why the engine also reports the two fields below.
-
-Extending the same comparison over N laps instead of one:
-
-    stay out:  N*b + m*(N*A + N(N+1)/2)
-    pit now:   pit_cost + N*b + m*N(N+1)/2
-    difference:  m*N*A - pit_cost
-
-Every b and every m*N(N+1)/2 cancels, leaving a per-lap advantage of exactly
-
-    m * A          <- slope times CURRENT age, constant on every future lap
-
-and therefore
+Extending the same comparison over N laps, every b and m*N(N+1)/2 cancels,
+leaving m*N*A - pit_cost. So the per-lap advantage of a fresh set is m*A --
+slope times current age, constant on every future lap -- and
 
     laps_to_break_even = pit_cost / (m * A)
 
-That is a genuine one-lap-lookahead result — no multi-lap simulation, no
-projection of future laps — because the advantage turns out to be constant.
-It is the number a strategist actually acts on.
-
-
-What this deliberately does not model
--------------------------------------
-- Fuel burn. Real lap times fall through a stint as the car sheds fuel
-  (roughly -0.03 s/lap). Fitting lap time against tyre age therefore measures
-  (degradation MINUS fuel effect), not degradation. On real Baku data this
-  was enough to make a HARD tyre's measured slope come out NEGATIVE. The
-  engine reports that honestly via `degradation_is_measurable` rather than
-  hiding it; correcting for it is not Day 2 scope.
-- Track position. Whether pitting drops you behind another car is a
-  multi-driver question and is dropped from this project entirely, not
-  deferred (DAY2.md). This engine answers "is it faster", never "will it
-  cost a place".
-- The tyre cliff. Real degradation is not linear; it steepens sharply late in
-  a stint. A straight line will under-predict a cliff. DAY2.md explicitly
-  asks for linear and warns against reaching for anything fancier.
+Not modelled: fuel burn (so the fit measures degradation minus fuel effect),
+track position, and the tyre cliff.
 """
 
 import logging
@@ -85,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Sample:
-    """One usable observation: how old the tyre was, how long the lap took."""
+    """One usable observation: tyre age and how long the lap took."""
 
     tyre_age: int
     lap_duration_s: float
@@ -94,7 +40,7 @@ class Sample:
 
 @dataclass(frozen=True)
 class DegradationFit:
-    """A fitted straight line: lap_time = intercept + slope * tyre_age."""
+    """A fitted line: lap_time = intercept + slope * tyre_age."""
 
     compound: str
     slope_s_per_lap: float
@@ -109,28 +55,23 @@ class DegradationFit:
 
 @dataclass
 class _CompoundHistory:
-    """Every sample seen for one compound, in this connection."""
-
     compound: str
     samples: list[Sample] = field(default_factory=list)
 
 
 class DecisionEngine:
-    """Accumulates ticks and produces a verdict once it can justify one."""
+    """Accumulates ticks and produces a verdict once it can justify one.
+
+    Uses only ticks already handed to it and holds no state outliving the
+    connection, so live mode reuses it unmodified.
+    """
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
         self._history: dict[str, _CompoundHistory] = {}
 
-    # --- public API -------------------------------------------------------
-
     def observe(self, tick: TickMessage) -> DecisionMessage | None:
-        """Record a tick and return a decision, or None if one isn't justified.
-
-        Returning None is a normal outcome, not a failure: at the start of a
-        stint on a compound never seen before, there is genuinely nothing to
-        say. The caller sends a `tick` with no `decision` after it.
-        """
+        """Record a tick and return a decision, or None if one is not justified yet."""
         self._record(tick)
 
         fit = self._fit(tick.compound)
@@ -139,14 +80,8 @@ class DecisionEngine:
 
         return self._decide(tick, fit)
 
-    # --- accumulation -----------------------------------------------------
-
     def _record(self, tick: TickMessage) -> None:
-        """Store the tick if it carries a lap time.
-
-        Note what is NOT filtered here: out-laps and slow laps are recorded,
-        and excluded later at fit time. That is deliberate — see _usable().
-        """
+        """Store the tick if it carries a lap time. Outliers are excluded later, at fit time."""
         if tick.lap_duration_s is None:
             return
 
@@ -162,43 +97,20 @@ class DecisionEngine:
         )
 
     def _usable(self, samples: list[Sample]) -> list[Sample]:
-        """Select the samples that represent normal green-flag running.
+        """Select samples representing normal green-flag running.
 
-        Two rules, both needed against real data:
+        Two monotonicity rules, both needed against real data. A lap is dropped
+        if it is much slower than the best lap at a SIMILAR tyre age, or much
+        slower than the best lap on an OLDER tyre.
 
-        1. Drop flagged out-laps. An out-lap starts in the pit lane and is
-           slow for reasons unrelated to tyre wear (+18.1s, measured).
+        They are complements. The first alone fails when a whole neighbourhood
+        is contaminated; the second alone cannot catch contamination at the end
+        of a stint, where no older laps exist. Comparing against the fastest lap
+        of the whole stint instead would discard every legitimately degraded lap
+        on a fast-wearing tyre.
 
-        2. Drop any lap more than `max_lap_time_excess_for_fit_s` slower than
-           the fastest lap seen at a SIMILAR TYRE AGE — within
-           `fit_outlier_window_laps` either side. Catches safety cars,
-           in-laps, traffic, mistakes and the standing start with one rule.
-
-        Why rule 2 is local, not global
-        -------------------------------
-        Comparing against the fastest lap of the whole stint was the first
-        version, and it was wrong in a way that only a hand-check exposed.
-        On a tyre degrading at 1.5 s/lap, a lap at age 18 is legitimately 27
-        seconds slower than a lap at age 0 — so a global threshold threw away
-        every degraded lap, left one sample, and the engine silently returned
-        no decision at all. It discarded precisely the evidence that
-        degradation was happening.
-
-        A local baseline separates the two cases, because degradation is
-        monotonic: a lap should never be much slower than a lap run on a
-        similarly-aged tyre. An anomaly is slow relative to its neighbours;
-        a worn tyre is slow relative to a NEW tyre but normal for its age.
-
-        Re-evaluated from scratch on every fit, against every sample seen so
-        far. That matters: if the opening laps on a compound are behind a
-        safety car, the baseline is initially contaminated too. As clean laps
-        arrive, the baseline drops and the earlier laps are retroactively
-        excluded. Filtering once at admission time would have let them in
-        permanently.
-
-        This is still strictly incremental — every sample considered has
-        already been seen. Re-deriving the clean set does not look ahead; it
-        re-reads the past with better information.
+        Re-derived on every fit, so a baseline that was itself contaminated is
+        corrected once clean laps arrive.
         """
         candidates = samples
         if self._settings.exclude_pit_out_laps_from_fit:
@@ -212,8 +124,6 @@ class DecisionEngine:
 
         kept: list[Sample] = []
         for sample in candidates:
-            # Rule 2a — local: slower than the best lap at a similar age.
-            # `neighbours` always contains `sample` itself, so min() is safe.
             neighbours = [
                 other.lap_duration_s
                 for other in candidates
@@ -222,24 +132,6 @@ class DecisionEngine:
             if sample.lap_duration_s > min(neighbours) + excess:
                 continue
 
-            # Rule 2b — monotonic: slower than the best lap on an OLDER tyre.
-            #
-            # Needed because 2a fails when an entire window is contaminated.
-            # Real case, Baku 2025: laps 1-4 were the standing start and a
-            # safety car, so at tyre age 0 every neighbour within +/-3 laps
-            # was also garbage, the local baseline was garbage, and lap 1
-            # (+25.7s) survived as the minimum of its own bad window — then
-            # dragged the fitted slope sharply negative.
-            #
-            # The argument is the same monotonicity as 2a, read the other
-            # way: a worn tyre should be SLOWER than a fresher one, so a lap
-            # that is much slower than a lap run later on a more worn set did
-            # not lose that time to tyre wear.
-            #
-            # 2a and 2b are complements, not duplicates: 2b cannot catch
-            # contamination at the very end of a stint (no older laps exist
-            # to compare against), and 2a cannot catch contamination whose
-            # whole neighbourhood is contaminated.
             older = [
                 other.lap_duration_s
                 for other in candidates
@@ -252,15 +144,8 @@ class DecisionEngine:
 
         return kept
 
-    # --- fitting ----------------------------------------------------------
-
     def _fit(self, compound: str) -> DegradationFit | None:
-        """Least-squares straight line for a compound, or None if not yet possible.
-
-        Returns None — not an error, not a zeroed fit — when there is nothing
-        honest to report: too few clean samples, or every sample at the same
-        tyre age (a vertical scatter has no slope; the denominator is zero).
-        """
+        """Least-squares line for a compound, or None when there is nothing honest to report."""
         history = self._history.get(compound)
         if history is None:
             return None
@@ -278,7 +163,7 @@ class DecisionEngine:
         mean_x = sum(xs) / n
         mean_y = sum(ys) / n
 
-        # Σ(x - x̄)² — zero when every sample shares one tyre age.
+        # Zero when every sample shares one tyre age: a vertical scatter has no slope.
         variance_x = sum((x - mean_x) ** 2 for x in xs)
         if variance_x == 0:
             logger.debug(
@@ -290,10 +175,9 @@ class DecisionEngine:
         slope = covariance / variance_x
         intercept = mean_y - slope * mean_x
 
-        # r² = 1 - SS_res/SS_tot. When SS_tot is zero every lap time was
-        # identical, and a flat line fits that perfectly, so r² is 1.0.
         ss_total = sum((y - mean_y) ** 2 for y in ys)
         ss_residual = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
+        # A flat line fits identical lap times perfectly.
         r_squared = 1.0 if ss_total == 0 else 1.0 - (ss_residual / ss_total)
 
         return DegradationFit(
@@ -305,27 +189,16 @@ class DecisionEngine:
             samples_seen=seen,
         )
 
-    # --- the decision -----------------------------------------------------
-
     def _decide(self, tick: TickMessage, fit: DegradationFit) -> DecisionMessage:
         """Turn a fitted curve and the current tyre state into a verdict."""
         pit_cost = self._settings.pit_lane_cost_seconds
         fresh_age = self._settings.fresh_tyre_reference_age
 
-        # Next lap on the current set: it will be one lap older than now.
         projected_stay = fit.predict(tick.tyre_age + 1)
-
-        # Next lap on a fresh set of the same compound. Read at age 1 rather
-        # than 0 (DAY2.md): lap one on a new set is not the tyre's best.
         projected_fresh = fit.predict(fresh_age)
 
-        # Per-lap gain from swapping to a fresh set, constant on every future
-        # lap. Derived directly rather than as a difference of the two
-        # projections above, so it stays exact regardless of fresh_age.
+        # Derived directly so it stays exact regardless of fresh_age.
         advantage = fit.slope_s_per_lap * tick.tyre_age
-
-        # The rule DAY2.md specifies, over exactly one lap.
-        # Positive => pitting is faster => pit_now.
         delta = projected_stay - (projected_fresh + pit_cost)
 
         measurable = advantage > 0

@@ -1,12 +1,7 @@
-"""Shared test fixtures.
+"""Shared fixtures. No network: every test runs against in-memory fakes.
 
-The guiding rule for this suite: NO NETWORK. Every test runs against
-in-memory fakes, so the suite is deterministic, fast, and does not fail
-because somebody else's API is down or rate-limits CI.
-
-The data the fakes return is real, though — session timings and stint shapes
-copied from actual OpenF1 responses (verified 2026-09-14), so the tests
-exercise the shapes production will meet rather than idealised ones.
+The data is real, though -- session timings and stint shapes copied from
+actual OpenF1 responses -- so tests meet the shapes production will.
 """
 
 from datetime import datetime, timezone
@@ -19,12 +14,7 @@ from backend.models import Lap, Session, Stint
 
 @pytest.fixture
 def settings() -> Settings:
-    """Default settings, constructed explicitly.
-
-    Not get_settings(), which is an lru_cache'd singleton reading the
-    environment — a developer's stray F1_* variable must not change what the
-    tests assert.
-    """
+    """Explicit, not get_settings(): a stray F1_* variable must not change assertions."""
     return Settings()
 
 
@@ -37,12 +27,7 @@ def utc(text: str) -> datetime:
 
 @pytest.fixture
 def baku_2025_race() -> Session:
-    """Azerbaijan GP 2025 race. A real, finished session.
-
-    Verified against GET /v1/sessions?session_key=9904 on 2026-09-14:
-    11:00:00+00:00 to 13:00:00+00:00. With a 30-minute margin its live window
-    is therefore 10:30 to 13:30 — the numbers the boundary tests assert.
-    """
+    """Real finished session: 11:00-13:00 UTC, so a live window of 10:30-13:30."""
     return Session(
         session_key=9904,
         session_name="Race",
@@ -58,11 +43,7 @@ def baku_2025_race() -> Session:
 
 @pytest.fixture
 def baku_2026_practice_1() -> Session:
-    """Azerbaijan 2026 FP1 — the real session this project is aimed at.
-
-    Verified against GET /v1/sessions?year=2026&country_name=Azerbaijan:
-    session_key 11370, 2026-09-24T08:30 to 09:30 UTC.
-    """
+    """The real session this project is aimed at: 2026-09-24, 08:30-09:30 UTC."""
     return Session(
         session_key=11370,
         session_name="Practice 1",
@@ -78,11 +59,7 @@ def baku_2026_practice_1() -> Session:
 
 @pytest.fixture
 def stints_one_driver() -> list[Stint]:
-    """Two stints for car #1, shaped like the real Baku 2025 response.
-
-    Stint 2 starts at tyre_age_at_start=4 because the real data does — a used
-    set. Fixtures that always start at 0 hide the tyre-age bug.
-    """
+    """Stint 2 starts on a used set (age 4), as the real data does."""
     return [
         Stint(
             driver_number=1, stint_number=1, lap_start=1, lap_end=3,
@@ -108,12 +85,7 @@ def laps_one_driver() -> list[Lap]:
 
 
 class FakeOpenF1Client:
-    """Stands in for OpenF1Client without touching the network.
-
-    Records every call so tests can assert on request COUNT as well as on
-    results — which is how the rate-limit test proves the poll loop is not
-    quietly making extra requests.
-    """
+    """Stands in for OpenF1Client. Records calls so tests can assert request counts."""
 
     def __init__(
         self,
