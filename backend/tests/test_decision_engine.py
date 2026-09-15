@@ -1,15 +1,9 @@
-"""Decision engine scenarios, ported from scripts/check_decisions.py.
+"""Decision engine scenarios.
 
-DAY4.md: "this was flagged as owed back on Day 2, pay it off now."
-
-Every expected value below was computed by hand from the stated line and tyre
-age BEFORE the engine was written, and is hardcoded. That is what makes these
-tests worth having: they encode an independent derivation, not whatever the
-code happened to produce. Constants: pit_cost 22.0s, fresh-tyre reference age
-1.0, minimum 3 clean samples.
-
-Two of these scenarios (C and F) caught real bugs on Day 2 that a "does it
-run without crashing" check would have missed entirely.
+Every expected value was computed by hand from the stated line and tyre age
+and is hardcoded, so these encode an independent derivation rather than
+whatever the code produced. Constants: pit_cost 22.0s, fresh-tyre reference
+age 1.0, minimum 3 clean samples.
 """
 
 import pytest
@@ -77,11 +71,8 @@ def test_worn_tyre_still_says_stay_out_but_break_even_is_near(settings):
 
 # --- C: a tyre falling apart, 95.0 + 1.5 * age, current age 20 ------------
 #   advantage = 30.0 s/lap ; delta = 126.50 - 118.50 = +8.00 -> pit_now
-#
-# This one caught a real bug: the original outlier rule dropped any lap more
-# than 5s slower than the fastest of the stint, which on a fast-degrading
-# tyre discarded every legitimately degraded lap, left one sample, and
-# silently emitted NO decision at all.
+# Guards a real bug: an outlier rule keyed to the fastest lap of the stint
+# discarded every legitimately degraded lap and emitted no decision at all.
 
 def test_severe_degradation_actually_flips_the_verdict_to_pit(settings):
     decision = decide(
@@ -140,11 +131,8 @@ def test_tick_without_a_lap_time_is_skipped_not_counted(settings):
 
 
 # --- F: contaminated input ------------------------------------------------
-#
-# Also caught a real bug on Day 2: with only the "similar tyre age" rule, a
-# fully contaminated neighbourhood (Baku laps 1-4 were a standing start plus
-# a safety car) let lap 1 survive as the minimum of its own bad window and
-# drag the fitted slope to -0.243 s/lap.
+# Guards a real bug: with only the "similar tyre age" rule, a fully
+# contaminated neighbourhood let lap 1 survive and invert the fitted slope.
 
 def test_outliers_are_excluded_and_the_true_slope_is_recovered(settings):
     engine = DecisionEngine(settings)
@@ -166,11 +154,7 @@ def test_outliers_are_excluded_and_the_true_slope_is_recovered(settings):
 
 
 def test_contamination_at_low_tyre_age_does_not_invert_the_slope(settings):
-    """The monotonic rule: a lap must not be much slower than an OLDER tyre's.
-
-    Reproduces the real Baku 2025 shape — laps 1-4 all contaminated, so the
-    local window has no clean neighbour to compare against.
-    """
+    """Reproduces the real Baku 2025 shape: laps 1-4 all contaminated."""
     engine = DecisionEngine(settings)
     engine.observe(tick(1, 0, "HARD", 129.1))   # standing start
     engine.observe(tick(2, 1, "HARD", 164.2))   # safety car

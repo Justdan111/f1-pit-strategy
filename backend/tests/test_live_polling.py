@@ -1,13 +1,8 @@
 """LiveTickSource polling behaviour.
 
-DAY4.md: "Track which laps have already been emitted (per driver) so a poll
-that sees no new laps emits nothing, rather than re-sending already-seen
-ticks."
-
-These tests drive the poll loop with a fake client whose data CHANGES between
-polls, which is the closest thing to a live session available before the 24th.
-What they cannot prove is that OpenF1 actually serves data this way during a
-real session — that is the part which waits for practice on 2026-09-24.
+Driven by a fake client whose data changes between polls. This proves the
+logic -- laps emitted once, in order, held back while still running -- but
+not that OpenF1 serves data this way during a real session.
 """
 
 from datetime import timedelta
@@ -109,13 +104,8 @@ async def test_a_poll_with_nothing_new_emits_nothing(settings, baku_2025_race):
 async def test_lap_in_progress_is_held_until_it_has_a_time(
     settings, baku_2025_race
 ):
-    """The live-specific rule.
-
-    A lap appears in /v1/laps when the car STARTS it, with a null duration.
-    Emitting immediately would send a tick whose lap time is permanently
-    null — it would never be re-sent — and the decision engine would lose a
-    sample from every lap of the race.
-    """
+    """A lap appears when the car STARTS it. Emitting early would permanently
+    lose its lap time, since it would never be re-sent."""
     schedule = [
         # Lap 3 has started but not finished.
         ([stint(3)], [lap(1, 95.0), lap(2, 94.8),
@@ -137,12 +127,7 @@ async def test_lap_in_progress_is_held_until_it_has_a_time(
 async def test_finished_lap_with_genuinely_missing_timing_is_still_emitted(
     settings, baku_2025_race
 ):
-    """Held back only while it might still be running.
-
-    Once a higher lap exists the earlier one is definitively over, so a
-    missing duration is real absence rather than pending data, and the tick
-    must be released — otherwise one gap stalls the stream permanently.
-    """
+    """Once a higher lap exists, a missing duration is real absence, not pending."""
     schedule = [
         ([stint(4)], [lap(1, 95.0), lap(2, 94.8),
                       Lap(driver_number=1, lap_number=3, lap_duration=None),
@@ -168,11 +153,7 @@ async def test_no_stints_yet_is_not_an_error(settings, baku_2025_race):
 async def test_stream_ends_on_idle_timeout_when_laps_stop_arriving(
     settings, baku_2025_race
 ):
-    """A session that stops producing laps must not poll forever.
-
-    This is the first of two termination paths and, with frozen data, the one
-    that fires: after live_idle_timeout_seconds with nothing new, give up.
-    """
+    """First of two termination paths: give up after the idle timeout."""
     frozen = ([stint(3)], [lap(1, 95.0), lap(2, 94.8), lap(3, 94.6)])
     source, _, clock = build(baku_2025_race, [frozen] * 5000, settings)
     await source.open()
@@ -203,17 +184,8 @@ class EndlessClient(FakeOpenF1Client):
 
 
 async def test_stream_ends_when_the_live_window_closes(settings, baku_2025_race):
-    """The second termination path: the session's window shuts.
-
-    Laps keep arriving so the idle timeout never fires, which forces the
-    window check to be the thing that stops it. Without this, a live
-    connection would never close on its own.
-    """
-    # Start five minutes from the close, so the run is short enough to keep
-    # the simulated lap count realistic. Starting at lights-out would
-    # generate ~870 laps, which the tick builder correctly rejects as
-    # implausible — and the test would then be measuring that guard rather
-    # than the window check it is about.
+    """Second termination path: laps keep arriving, so only the window can stop it."""
+    # Five minutes from the close, so the simulated lap count stays realistic.
     closes = baku_2025_race.date_end + timedelta(minutes=30)
     clock = Clock(closes - timedelta(minutes=5))
     client = EndlessClient([baku_2025_race])

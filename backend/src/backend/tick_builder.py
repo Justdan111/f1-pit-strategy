@@ -1,15 +1,4 @@
-"""Turning OpenF1's stints + laps into TickMessages.
-
-Extracted from ReplayTickSource on Day 4 so LiveTickSource uses the SAME
-code, not merely equivalent code.
-
-DAY4.md requires live ticks to be "the exact same shape" as replay ticks, so
-that the decision engine and frontend need no changes. Two separate
-implementations could satisfy that on the day they were written and drift the
-first time either is touched. One shared function cannot drift: there is only
-one place where a TickMessage is constructed from race data, and the contract
-test asserts both sources route through it.
-"""
+"""Turning OpenF1 stints + laps into TickMessages. Shared by both TickSource implementations."""
 
 import logging
 
@@ -18,9 +7,7 @@ from .tick_source import NoDataError
 
 logger = logging.getLogger(__name__)
 
-# No Grand Prix has ever exceeded ~200 laps (the 1950s Indy 500 counted for
-# the championship at 200). 500 is far beyond any real session while still
-# small enough to stop a corrupt lap_end from exhausting memory.
+# Beyond any real session, but small enough that a corrupt lap_end cannot exhaust memory.
 MAX_PLAUSIBLE_STINT_LAPS = 500
 
 
@@ -31,15 +18,8 @@ def resolve_driver(
 ) -> int:
     """Pick which driver to stream.
 
-    A session's stints cover the whole grid; a tick stream is about one car.
-    If a driver was named, use it (and say clearly if they are not present).
-    Otherwise take the car that has completed the most laps, tie-broken by
-    lowest number — deterministic, and biased towards a car that is actually
-    running rather than one that retired early.
-
-    Shared between replay and live. In live mode "most laps so far" is
-    re-evaluated only once, on the first poll that returns data, so the
-    stream does not switch cars mid-race.
+    With no driver named, take the car that completed the most laps, tie-broken
+    by lowest number: deterministic, and biased towards a car still running.
     """
     available = {s.driver_number for s in stints}
 
@@ -63,36 +43,14 @@ def resolve_driver(
 
 
 def flatten_to_ticks(stints: list[Stint], laps: list[Lap]) -> list[TickMessage]:
-    """Expand stint ranges into one tick per lap, merged with lap timing.
+    """Expand stint ranges into one tick per lap, merged with lap timing on lap number.
 
-    Stints are ranges ("laps 19-40 on HARDs, starting at age 0"); ticks are
-    points ("lap 27, HARD, age 8"). This is where that expansion happens, and
-    where tyre age is computed:
+    Tyre age is `tyre_age_at_start + (lap - lap_start)`, not `lap - lap_start`:
+    OpenF1 reports stints beginning on used sets.
 
-        tyre_age = tyre_age_at_start + (lap - lap_start)
-
-    NOT simply (lap - lap_start). OpenF1 reports stints that begin on used
-    sets — Baku 2025 car #1 stint 2 starts at age 4 — so the naive version is
-    wrong on real data while passing every test written against a naive
-    fixture. Day 2's degradation curve depends on this being right.
-
-    The merge: timing comes from a different endpoint (/v1/laps) than tyre
-    data (/v1/stints), with no shared row identity, so they are joined on lap
-    number. Callers narrow both sides to one driver first.
-
-    Robustness, which matters more in live mode than replay (DAY4.md asks for
-    malformed or partial data to degrade rather than crash):
-
-    - A lap with no timing entry keeps lap_duration_s = None rather than
-      being dropped. The tick is still true — the car ran that lap on that
-      tyre — only the degradation fit loses a data point.
-    - A stint whose lap_end precedes its lap_start is skipped and logged.
-      Live data is mid-flight and can be briefly inconsistent; one nonsense
-      stint must not take the stream down.
-    - A stint spanning an implausible number of laps is skipped rather than
-      expanded. Without this, a single corrupt lap_end of 100000 would build
-      a hundred thousand ticks and exhaust memory — a malformed-data bug that
-      presents as an outage.
+    Bad records are skipped rather than fatal, since live data can be briefly
+    inconsistent. A lap with no timing keeps lap_duration_s = None; the tick is
+    still true, only the fit loses a point.
     """
     timing: dict[int, Lap] = {lap.lap_number: lap for lap in laps}
     by_lap: dict[int, TickMessage] = {}
@@ -129,8 +87,5 @@ def flatten_to_ticks(stints: list[Stint], laps: list[Lap]) -> list[TickMessage]:
                 is_pit_out_lap=timed.is_pit_out_lap if timed else False,
             )
 
-    # Sorted so the stream is strictly chronological regardless of the order
-    # stints arrived in. Later stints overwrite earlier ones on a shared lap,
-    # which matches reality: after a stop, that lap ran on the new set.
+    # Sorted so the stream is chronological; a later stint wins a shared lap.
     return [by_lap[lap] for lap in sorted(by_lap)]
-

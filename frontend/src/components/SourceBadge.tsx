@@ -1,17 +1,6 @@
 import { SourceKind } from "@/lib/types";
 
-/**
- * Shows what the server reported in `start.source` — literally.
- *
- * DAY3.md is specific about this: the badge reflects what the backend
- * actually did, not what the connect form requested. Those are different
- * facts and they could diverge (a future backend might silently fall back
- * from live to replay). Rendering the request instead of the answer would be
- * a dashboard that quietly lies about whether you are watching a real race.
- *
- * The raw value is always shown alongside the human label for the same
- * reason — a reader can check the badge against the raw `start` frame.
- */
+/** Shows `start.source` literally: what the server did, not what was requested. */
 const LABELS: Record<SourceKind, { label: string; hint: string }> = {
   sample: {
     label: "SAMPLE",

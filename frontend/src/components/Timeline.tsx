@@ -1,16 +1,8 @@
 import { TickMessage } from "@/lib/types";
 
 /**
- * The running list of ticks, newest first.
- *
- * Newest-first rather than append-to-bottom: the interesting lap is always
- * the one that just arrived, and this way it is at a fixed position instead
- * of scrolling away. The list is NOT truncated — trimming to the last N rows
- * would mean the decision panel could reference a lap no longer visible,
- * which is the exact timeline/panel disagreement DAY3.md warns about.
- *
- * `lap_duration_s` is nullable upstream, so a missing value renders as an
- * explicit dash. Rendering it as 0.000 would be inventing a lap time.
+ * Ticks, newest first. Never truncated: trimming would let the decision panel
+ * reference a lap no longer visible. A null lap time renders as a dash.
  */
 export function Timeline({
   ticks,
