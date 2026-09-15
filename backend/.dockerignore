@@ -1,0 +1,15 @@
+# Keep the build context small and the image clean. .venv especially: copying
+# a host virtualenv into the image would shadow the one built inside it, with
+# macOS binaries that cannot run on linux.
+.venv/
+__pycache__/
+**/__pycache__/
+*.py[oc]
+.git/
+.gitignore
+.pytest_cache/
+tests/
+scripts/
+.env
+.env.*
+*.md

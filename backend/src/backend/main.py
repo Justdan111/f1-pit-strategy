@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import Settings, get_settings
@@ -62,6 +63,50 @@ app = FastAPI(
 )
 
 
+# --- CORS ----------------------------------------------------------------
+#
+# Applies to the HTTP routes. Note what it does NOT cover: WebSocket
+# handshakes are not subject to CORS at all — browsers send an Origin header
+# but do not preflight, and no CORS header can refuse one. Restricting who
+# may open a stream therefore has to be done explicitly in the handler, which
+# is what `_origin_allowed` below does.
+_settings = get_settings()
+_origins = _settings.allowed_origin_list
+
+app.add_middleware(
+    CORSMiddleware,
+    # An empty configuration means local development, where the frontend is
+    # on :3000 and the backend on :8000 — different origins, so without this
+    # even local use would fail. Deployment sets the variable explicitly.
+    allow_origins=_origins or ["*"],
+    allow_credentials=bool(_origins),
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+if not _origins:
+    logger.warning(
+        "F1_ALLOWED_ORIGINS is not set: all origins are allowed. Fine locally, "
+        "not for a deployed service."
+    )
+
+
+def _origin_allowed(origin: str | None) -> bool:
+    """Whether a WebSocket handshake from this Origin may proceed.
+
+    Unrestricted when no origins are configured (local development). A
+    non-browser client such as scripts/ws_client.py sends no Origin header at
+    all and is allowed through — Origin is a browser guarantee, not an
+    authentication mechanism, and pretending otherwise would give a false
+    sense of protection while breaking the CLI tools.
+    """
+    if not _origins:
+        return True
+    if origin is None:
+        return True
+    return origin.rstrip("/") in _origins
+
+
 # --- REST ----------------------------------------------------------------
 
 
@@ -77,13 +122,17 @@ async def health() -> dict[str, object]:
     return {
         "status": "ok",
         "service": "f1-pit-strategy",
-        "day": 4,
+        "day": 5,
         "modes_available": ["replay", "live"],
         "live_poll_interval_seconds": settings.live_poll_interval_seconds,
         "live_window_margin_minutes": settings.live_window_margin_minutes,
         "replay_tick_interval_seconds": settings.replay_tick_interval_seconds,
         "pit_lane_cost_seconds": settings.pit_lane_cost_seconds,
         "min_samples_for_fit": settings.min_samples_for_fit,
+        # Echoed so a CORS misconfiguration is visible from a curl against
+        # the deployed service, rather than only as a frontend that cannot
+        # connect (DAY5.md asks for exactly this not to be a late discovery).
+        "allowed_origins": settings.allowed_origin_list or ["*"],
     }
 
 
@@ -190,6 +239,23 @@ async def stream_race(
     accepted socket lets us send a real `error` envelope and then close
     cleanly. Errors are part of the protocol, not an absence of it.
     """
+    origin = websocket.headers.get("origin")
+    if not _origin_allowed(origin):
+        # Accept first, then refuse in-protocol. A rejected handshake gives
+        # the browser an opaque failure; this way the reason is readable.
+        await websocket.accept()
+        logger.warning("Refused WebSocket from disallowed origin: %r", origin)
+        await _send_error(
+            websocket,
+            detail=(
+                f"Origin {origin!r} is not allowed to open a stream. "
+                f"Configured origins: {_origins}."
+            ),
+            code="origin_not_allowed",
+        )
+        await _close_quietly(websocket)
+        return
+
     await websocket.accept()
 
     settings: Settings = websocket.app.state.settings

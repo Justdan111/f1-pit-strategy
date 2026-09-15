@@ -279,18 +279,73 @@ function reducer(state: RaceStreamState, action: Action): RaceStreamState {
   }
 }
 
-const DEFAULT_BACKEND =
-  process.env.NEXT_PUBLIC_BACKEND_WS_URL ?? "ws://127.0.0.1:8000";
+/**
+ * Where the backend lives, as a WebSocket origin.
+ *
+ * `NEXT_PUBLIC_BACKEND_WS_URL` may be given in whichever form is natural —
+ * `https://…`, `http://…`, `wss://…`, `ws://…`, or a bare host. Accepting
+ * all of them and normalising here is deliberate: the value gets typed into
+ * a Vercel dashboard box, and the obvious thing to paste is the backend's
+ * `https://` URL. Requiring `wss://` would make the natural input silently
+ * wrong.
+ *
+ * THE SCHEME MATTERS (flagged on Day 4). A page served over HTTPS cannot
+ * open a plain `ws://` connection — browsers block it as mixed content, with
+ * a console error and no callback. Production must be `wss://`, and that is
+ * derived from the configured origin rather than hardcoded, so the same
+ * build works on http://localhost and on https://…vercel.app.
+ */
+function toWebSocketOrigin(raw: string, pageIsSecure: boolean): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (trimmed.startsWith("wss://") || trimmed.startsWith("ws://")) return trimmed;
+  if (trimmed.startsWith("https://")) return `wss://${trimmed.slice(8)}`;
+  if (trimmed.startsWith("http://")) return `ws://${trimmed.slice(7)}`;
+  // A bare host takes the page's own security level: an HTTPS page must not
+  // downgrade to ws://, and a local HTTP page cannot use wss:// without TLS.
+  return `${pageIsSecure ? "wss" : "ws"}://${trimmed}`;
+}
+
+export class BackendNotConfiguredError extends Error {}
+
+/**
+ * Resolve the backend origin, or explain precisely what is missing.
+ *
+ * Falling back to localhost when the variable is unset would be actively
+ * unhelpful in production: the deployed page would try to reach the
+ * viewer's own machine and fail with a generic connection error that says
+ * nothing about the actual cause. So the fallback applies only when the page
+ * is itself served from localhost.
+ */
+export function resolveBackendOrigin(): string {
+  const configured = process.env.NEXT_PUBLIC_BACKEND_WS_URL;
+  const isBrowser = typeof window !== "undefined";
+  const pageIsSecure = isBrowser && window.location.protocol === "https:";
+  const pageIsLocal =
+    isBrowser &&
+    ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname);
+
+  if (configured && configured.trim()) {
+    return toWebSocketOrigin(configured, pageIsSecure);
+  }
+  if (!isBrowser || pageIsLocal) {
+    return "ws://127.0.0.1:8000";
+  }
+  throw new BackendNotConfiguredError(
+    "NEXT_PUBLIC_BACKEND_WS_URL is not set. This deployment does not know " +
+      "where the backend is. Set it to the backend's URL (for example " +
+      "https://your-service.onrender.com) in the hosting dashboard and redeploy.",
+  );
+}
 
 export function buildStreamUrl(
   sessionKey: string,
   mode: Mode,
-  backend: string = DEFAULT_BACKEND,
+  backend?: string,
 ): string {
-  // `mode` is always passed through, never hardcoded to "replay" — DAY3.md
-  // asks for the connection layer to be mode-generic now so that Day 4 is a
-  // toggle change rather than a restructuring of this file.
-  const base = backend.replace(/\/$/, "");
+  // `mode` is always passed through, never hardcoded to "replay" — the
+  // connection layer stayed mode-generic from Day 3, which is why enabling
+  // live mode on Day 4 needed no change here.
+  const base = (backend ?? resolveBackendOrigin()).replace(/\/$/, "");
   return `${base}/ws/race/${encodeURIComponent(sessionKey)}?mode=${mode}`;
 }
 
@@ -351,9 +406,15 @@ export function useRaceStream() {
       try {
         socket = new WebSocket(buildStreamUrl(sessionKey, mode));
       } catch (cause) {
+        // A missing NEXT_PUBLIC_BACKEND_WS_URL lands here. Reported with its
+        // own message so a deployment misconfiguration reads as exactly that
+        // rather than as a mysterious connection failure.
         dispatch({
           kind: "transport_error",
-          detail: `Could not open a WebSocket: ${String(cause)}`,
+          detail:
+            cause instanceof BackendNotConfiguredError
+              ? cause.message
+              : `Could not open a WebSocket: ${String(cause)}`,
         });
         return;
       }
@@ -408,8 +469,9 @@ export function useRaceStream() {
         dispatch({
           kind: "transport_error",
           detail:
-            "WebSocket transport error. Is the backend running at " +
-            `${DEFAULT_BACKEND}? Start it with: uv run uvicorn backend.main:app`,
+            "WebSocket transport error — the connection could not be " +
+            `established to ${resolveBackendOrigin()}. If you are running ` +
+            "locally, start the backend with: uv run uvicorn backend.main:app",
         });
 
       socket.onclose = () => {
