@@ -40,5 +40,8 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# Keep the documented example; real .env files stay ignored above.
+# .env.example documents the variables; .env.production holds the public
+# NEXT_PUBLIC_ backend URL, which is compiled into the browser bundle anyway.
+# Real local overrides (.env.local) stay ignored.
 !.env.example
+!.env.production
