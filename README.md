@@ -17,7 +17,7 @@ same pipeline.
 
 | | |
 |---|---|
-| Dashboard | _not yet deployed_ |
+| Dashboard | https://f1-pit-strategy.vercel.app |
 | API | https://f1-pit-strategy.onrender.com |
 | Health | https://f1-pit-strategy.onrender.com/health |
 
