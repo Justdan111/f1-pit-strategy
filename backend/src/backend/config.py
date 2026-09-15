@@ -90,6 +90,26 @@ class Settings(BaseSettings):
     # Accepted for Day 2; a residual-based refit would be the Day 4 answer.
     fit_outlier_window_laps: int = 3
 
+    # --- Deployment (Day 5) ---
+
+    # Browser origins allowed to call this API, comma-separated, e.g.
+    #   F1_ALLOWED_ORIGINS=https://f1-pit-strategy.vercel.app
+    #
+    # A plain string rather than list[str] because pydantic-settings parses
+    # complex types as JSON, and typing a JSON array into a hosting
+    # dashboard's env-var box is an easy thing to get subtly wrong.
+    #
+    # Empty means "allow any origin", which is the right default for local
+    # development and the wrong one for production — so deployment sets it
+    # explicitly and the /health response echoes what is configured, making a
+    # misconfiguration visible before it is discovered as a broken frontend.
+    allowed_origins: str = ""
+
+    @property
+    def allowed_origin_list(self) -> list[str]:
+        """Parsed origins. Empty list means unrestricted."""
+        return [o.strip().rstrip("/") for o in self.allowed_origins.split(",") if o.strip()]
+
     # --- Live mode (Day 4) ---
 
     # How long before a session starts, and after it ends, OpenF1 serves live

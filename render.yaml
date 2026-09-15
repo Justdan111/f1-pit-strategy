@@ -1,0 +1,22 @@
+# Render Blueprint — infrastructure as code, so the deployment is reviewable
+# in the repo rather than living only as dashboard clicks somebody has to
+# remember. Render reads this on "New > Blueprint".
+services:
+  - type: web
+    name: f1-pit-strategy-backend
+    # THE POINT OF DAY 5: `docker`, not Render's auto-detected Python
+    # buildpack. The buildpack would detect pyproject.toml and guess a start
+    # command; this runs the exact image verified locally.
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: F1_OPENF1_BASE_URL
+        value: https://api.openf1.org/v1
+      # sync: false means "prompt me, do not store it here". The frontend's
+      # deployed origin is not known until Vercel has deployed, and it does
+      # not belong in version control.
+      - key: F1_ALLOWED_ORIGINS
+        sync: false
