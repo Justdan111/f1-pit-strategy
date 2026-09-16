@@ -20,3 +20,7 @@ services:
       # not belong in version control.
       - key: F1_ALLOWED_ORIGINS
         sync: false
+      # Comma-separated keys required on the WebSocket. Leaving this unset
+      # leaves the stream open to anyone.
+      - key: F1_API_KEYS
+        sync: false

@@ -8,6 +8,7 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .auth import extract_key, is_authorised, selected_subprotocol
 from .config import Settings, get_settings
 from .decision_engine import DecisionEngine
 from .live import LATEST_SESSION_KEY, LiveTickSource, NoLiveSessionError
@@ -60,10 +61,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_api_keys = _settings.api_key_list
+
 if not _origins:
     logger.warning(
         "F1_ALLOWED_ORIGINS is not set: all origins are allowed. Fine locally, "
         "not for a deployed service."
+    )
+if not _api_keys:
+    logger.warning(
+        "F1_API_KEYS is not set: the WebSocket accepts unauthenticated "
+        "connections. Fine locally, not for a deployed service."
     )
 
 
@@ -95,8 +103,11 @@ async def health() -> dict[str, object]:
         "replay_tick_interval_seconds": settings.replay_tick_interval_seconds,
         "pit_lane_cost_seconds": settings.pit_lane_cost_seconds,
         "min_samples_for_fit": settings.min_samples_for_fit,
-        # Echoed so a CORS misconfiguration is visible from a curl.
+        # Echoed so a misconfiguration is visible from a curl rather than
+        # discovered as a frontend that cannot connect. The keys themselves
+        # are never echoed, only whether any are configured.
         "allowed_origins": settings.allowed_origin_list or ["*"],
+        "websocket_auth_required": bool(settings.api_key_list),
     }
 
 
@@ -179,9 +190,15 @@ async def stream_race(
     The connection is accepted before anything is validated, so a rejection
     can be explained in-protocol rather than as an opaque handshake failure.
     """
+    subprotocols: list[str] = websocket.scope.get("subprotocols") or []
+    # Echoed on every accept, including refusals: a browser that offered a
+    # subprotocol closes the connection unless the server names one back, and
+    # a refusal the client cannot read is indistinguishable from a crash.
+    subprotocol = selected_subprotocol(subprotocols)
+
     origin = websocket.headers.get("origin")
     if not _origin_allowed(origin):
-        await websocket.accept()
+        await websocket.accept(subprotocol=subprotocol)
         logger.warning("Refused WebSocket from disallowed origin: %r", origin)
         await _send_error(
             websocket,
@@ -194,7 +211,27 @@ async def stream_race(
         await _close_quietly(websocket)
         return
 
-    await websocket.accept()
+    presented = extract_key(websocket.headers.get("authorization"), subprotocols)
+    if not is_authorised(presented, _api_keys):
+        await websocket.accept(subprotocol=subprotocol)
+        # The key itself is never logged, only whether one was offered.
+        logger.warning(
+            "Refused WebSocket: %s API key.",
+            "invalid" if presented else "missing",
+        )
+        await _send_error(
+            websocket,
+            detail=(
+                "A valid API key is required to open a stream. Send it as "
+                "'Authorization: Bearer <key>', or from a browser as the "
+                "WebSocket subprotocol 'f1key.<key>'."
+            ),
+            code="unauthorized",
+        )
+        await _close_quietly(websocket)
+        return
+
+    await websocket.accept(subprotocol=subprotocol)
 
     settings: Settings = websocket.app.state.settings
     interval = _clamp_interval(tick_interval, settings)

@@ -38,6 +38,17 @@ class Settings(BaseSettings):
             o.strip().rstrip("/") for o in self.allowed_origins.split(",") if o.strip()
         ]
 
+    # --- Authentication ---
+    # Comma-separated API keys accepted on the WebSocket. Empty disables the
+    # check entirely, which is right for local development and wrong for a
+    # deployed service.
+    api_keys: str = ""
+
+    @property
+    def api_key_list(self) -> list[str]:
+        """Accepted keys. Empty list means the WebSocket is open."""
+        return [k.strip() for k in self.api_keys.split(",") if k.strip()]
+
     # --- Live mode ---
     # OpenF1 serves live data from 30 minutes before a session to 30 after.
     # Do not widen this to make local testing easier.

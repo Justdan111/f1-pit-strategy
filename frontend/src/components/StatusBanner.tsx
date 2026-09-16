@@ -96,7 +96,19 @@ export function StatusBanner({ state }: { state: RaceStreamState }) {
         </p>
       )}
 
-      {state.status === "error" && state.error && (
+      {/* An auth failure is a configuration problem, not a transport one, so
+          it gets its own instruction rather than the generic error text. */}
+      {state.status === "error" && state.error?.code === "unauthorized" && (
+        <p>
+          The backend rejected this connection: no valid API key was sent. Set{" "}
+          <code>NEXT_PUBLIC_API_KEY</code> to a key the backend accepts and
+          redeploy.
+        </p>
+      )}
+
+      {state.status === "error" &&
+        state.error &&
+        state.error.code !== "unauthorized" && (
         <p>
           {state.error.detail}
           {state.error.code && (

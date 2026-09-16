@@ -12,6 +12,7 @@ streaming.
 import argparse
 import asyncio
 import json
+import os
 import time
 from urllib.parse import urlencode
 
@@ -36,12 +37,18 @@ async def run(args: argparse.Namespace) -> int:
     url = build_url(args)
     print(f"connecting: {url}\n")
 
+    # A header, not a query parameter: the key would otherwise be written to
+    # the server's access log on every connection.
+    headers = {}
+    if args.api_key:
+        headers["Authorization"] = f"Bearer {args.api_key}"
+
     started = time.perf_counter()
     counts: dict[str, int] = {}
     exit_code = 0
 
     try:
-        async with websockets.connect(url) as ws:
+        async with websockets.connect(url, additional_headers=headers) as ws:
             async for raw in ws:
                 elapsed = time.perf_counter() - started
                 payload = json.loads(raw)
@@ -91,6 +98,11 @@ async def run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="ws://127.0.0.1:8000")
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("F1_API_KEY"),
+        help="API key, if the server requires one. Defaults to $F1_API_KEY.",
+    )
     parser.add_argument("--session-key", default="sample")
     parser.add_argument("--mode", default="replay", choices=["replay", "live"])
     parser.add_argument("--driver-number", type=int, default=None)
