@@ -37,10 +37,19 @@ WORKDIR /app
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
 COPY --from=builder --chown=app:app /app/src /app/src
 
+# A writable data directory. /app is created by WORKDIR and owned by root, so
+# the non-root user cannot write there -- which silently disabled the decision
+# log in the container until this was caught. Keeping the source tree
+# non-writable is worth keeping: the app cannot modify its own code.
+#
+# Mount a volume here to make the log survive a redeploy.
+RUN mkdir -p /data && chown app:app /data
+
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8000
+    PORT=8000 \
+    F1_DECISION_LOG_PATH=/data/decisions.db
 
 USER app
 

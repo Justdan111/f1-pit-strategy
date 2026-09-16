@@ -28,5 +28,8 @@ services:
       # plan wipes on every deploy and every spin-down. It is useful for
       # reviewing a race just watched, not for keeping a history. A mounted
       # disk (paid) or a hosted database would be needed for that.
+      # The image defaults this to /data/decisions.db, which is writable by
+      # the non-root user. On the free plan that directory is still wiped on
+      # every deploy and spin-down; mounting a disk at /data makes it durable.
       - key: F1_DECISION_LOG_PATH
-        value: /tmp/decisions.db
+        value: /data/decisions.db
