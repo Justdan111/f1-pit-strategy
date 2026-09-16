@@ -208,6 +208,95 @@ During the Azerbaijan weekend (24–26 September 2026):
 
 ---
 
+## Backtest validation
+
+`uv run python scripts/backtest.py` replays finished races through the real
+decision engine and scores it. Three measurements, which prove very different
+things.
+
+Everything is computed incrementally: each prediction uses only laps before
+the one being predicted. A test deliberately alters the end of a race and
+asserts earlier predictions do not move — verified to fail when a future-data
+leak is introduced, so it is not a vacuous check.
+
+### 1. Prediction accuracy — the only non-circular measurement
+
+How close the fitted curve's next-lap estimate is to the lap time that
+actually happened, against two baselines a model must beat to earn its place.
+
+Over 8 races from 2025, 312 clean predictions:
+
+| predictor | MAE | RMSE | median AE |
+|---|---|---|---|
+| model | 0.888s | 3.849s | 0.328s |
+| persistence (next lap = this lap) | 1.044s | 5.183s | 0.179s |
+| compound mean | 6.121s | 10.338s | 1.020s |
+
+**The mean and the median disagree, and both are reported.** The model beats
+persistence by 0.156s on MAE but loses by 0.148s on median error. Read
+together: the model is *worse on a typical lap* and *better on the awkward
+ones*, because a fitted trend degrades more gracefully than "assume nothing
+changes" when something does. Quoting only the MAE would be picking the
+flattering number.
+
+Unfiltered — including out-laps, in-laps and safety-car laps — the model loses
+to persistence by 0.922s MAE. That is honest and expected: those laps are slow
+for reasons the degradation model does not claim to explain, and a trend
+extrapolates confidently into them while persistence does not.
+
+### 2. Counterfactual pit lap — circular
+
+Total race time under alternative pit laps, scored by the fitted curves.
+**Uses the same model being evaluated**, so it can show internal consistency
+and nothing else.
+
+In practice it mostly fails to say anything: 3 of 4 one-stop races produced a
+degenerate optimum at the edge of the swept range. That happens whenever the
+second compound simply fits faster — with no notion of minimum stint length,
+the sweep collapses to "pit immediately". Those are flagged and excluded.
+Useful mainly as a demonstration of why the circular measure cannot be
+trusted.
+
+### 3. Gap to the actual pit lap — context, not ground truth
+
+Distance between the engine's recommendation and what the team did. Teams also
+optimise track position, which this project deliberately does not model, so a
+gap is not necessarily an error on either side.
+
+- All races: **10.4 laps** mean absolute gap
+- Excluding races with 3+ stops: **4.0 laps**
+
+Three or more stops in a dry race is vanishingly rare; it almost always means
+rain or a red flag. Melbourne 2025 (five stops, wet) produced a 39-lap gap on
+its own. Weather is out of scope, so those comparisons are meaningless in
+either direction and are kept out of the headline.
+
+### The caveat that dominates everything
+
+**Degradation was measurable — a fitted slope above zero — in only 37% of
+decisions.** Fitting lap time against tyre age measures degradation *minus*
+fuel burn (~−0.03 s/lap). Where the slope comes out flat or negative the
+engine reports no break-even point rather than inventing one, so it declines
+to recommend a stop at all: it did so in 2 of 8 races.
+
+That is the honest headline. The model is not confidently outperforming race
+strategists; it is a defensible one-step predictor that beats a naive baseline
+on average, declines to answer more often than not, and would need fuel-burn
+correction before its pit recommendations could be taken seriously. Fixing
+that is the top item under [what's next](#whats-next).
+
+### Two things the backtest itself exposed
+
+- **The rate limiter matters for batch work too.** Eight races is 16 rapid
+  requests; OpenF1 returned a real 429 and a race vanished from the report
+  without changing any visible total. The batch now paces at 2.5s between
+  requests and retries with backoff rather than dropping a race silently.
+- **Malformed-data handling earns its keep on real data.** Melbourne 2025
+  returned INTERMEDIATE stints with null lap ranges — wet tyres fitted but
+  never run. They are dropped and logged rather than crashing the run.
+
+---
+
 ## Simplifications
 
 Deliberate, not oversights:
@@ -250,3 +339,14 @@ live data from 30 minutes before a session starts to 30 minutes after it ends.
 One quirk: a query matching nothing returns `404 {"detail": "No results
 found."}` rather than `200 []`. That's an empty result, not a rejected
 request, and the client normalises it.
+
+---
+
+## What's next
+
+1. **Fuel-burn correction.** The single change that would most improve the
+   engine: degradation currently reads negative on most real races, which is
+   why it declines to recommend a stop 63% of the time.
+2. **Multi-lap lookahead.** The one-lap comparison is why `verdict` reads
+   `stay_out` almost always and `laps_to_break_even` is the number to act on.
+3. **The live test**, 24-26 September 2026.
