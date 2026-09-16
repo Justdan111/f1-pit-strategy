@@ -1,15 +1,23 @@
 # Engineering notes
 
-Detail that doesn't belong in the README: why things are built the way they
-are, what's been verified, and what the known limits are.
+Why the numbers are what they are, what has been measured, and what the known
+limits are. For how the system is put together see
+[ARCHITECTURE.md](ARCHITECTURE.md); for the API surface see [API.md](API.md).
 
 ## Contents
+
 - [Three decisions worth explaining](#three-decisions-worth-explaining)
-- [Architecture](#architecture)
-- [Message protocol](#message-protocol)
+- [Architecture and protocol](#architecture-and-protocol) (moved out)
 - [Verification status](#verification-status)
+- [Backtest validation](#backtest-validation)
+- [Confidence bounds on the fit](#confidence-bounds-on-the-fit)
+- [Fuel-burn correction](#fuel-burn-correction)
+- [API key on the WebSocket](#api-key-on-the-websocket)
+- [Persisted decision log](#persisted-decision-log)
 - [Simplifications](#simplifications)
 - [Why Docker](#why-docker)
+- [Data source](#data-source)
+- [What's next](#whats-next)
 
 ---
 
@@ -91,77 +99,19 @@ contaminated, the second can't catch contamination at the end of a stint.
 
 ---
 
-## Architecture
+## Architecture and protocol
 
-```
-        TickSource (interface)
-        ├── ReplayTickSource   a finished race or the offline fixture, paced
-        └── LiveTickSource     polls OpenF1 during a live session
-                    │
-                    ▼             both produce identical TickMessages
-            decision_engine       one engine; it cannot tell them apart
-                    │
-                    ▼
-        FastAPI   WS /ws/race/{session_key}?mode=replay|live
-                    │
-                    ▼
-            Next.js dashboard     shows which mode is active, always
-```
+Moved out of this file as it grew:
 
-**The constraint that shapes everything:** every number is computed from data
-seen so far, never from the full race in hindsight. The decision engine only
-ever sees "the next tick". It cannot look ahead, because during a live race
-there is nothing ahead to look at. That's also what makes replay honest —
-replaying a finished race produces exactly what you'd have seen live.
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — components, the `TickSource` seam,
+  connection lifecycle, concurrency and failure models, deployment topology,
+  module map, testing strategy.
+- **[API.md](API.md)** — every endpoint, every message field, error codes and
+  the full configuration reference.
 
-### The maths
+This file is the record of *why* the numbers are what they are, and what has
+been measured.
 
-Fit lap time as a straight line in tyre age, per compound:
-
-```
-lap_time(age) = b + m * age
-```
-
-For a set of age `A`, comparing the next lap:
-
-```
-stay out:  b + m*(A + 1)
-pit now:   b + m*1 + pit_cost
-delta   :  m*A - pit_cost
-```
-
-Extending over N laps, every `b` and `m*N(N+1)/2` cancels, leaving
-`m*N*A - pit_cost`. So the per-lap advantage of a fresh set is **`m * A`** —
-slope times *current* age, constant on every future lap — and:
-
-```
-laps_to_break_even = pit_cost / (m * A)
-```
-
-Not `pit_cost / m`, which would overstate the pit window by a factor of the
-tyre's age. The one-lap `verdict` reads `stay_out` almost always;
-`laps_to_break_even` is the number to act on.
-
----
-
-## Message protocol
-
-`start` → (`tick` → `decision`)* → `end`, or `error`, or `no_live_session`.
-
-`no_live_session` is a message type of its own rather than an error, because
-live mode spends most of the year with nothing to connect to. Rendering that
-as a failure would train you to ignore the component meant to tell you when
-something is genuinely broken.
-
-`TickMessage` deliberately carries no mode field — mode is stated once, in
-`start`, so the decision engine is structurally unable to branch on it.
-
-WebSocket handshakes are **not** subject to CORS: browsers send `Origin` but
-don't preflight, and no CORS header can refuse one. Stream access is therefore
-checked explicitly in the handler. Configuring only CORS would look correct
-and protect nothing.
-
----
 
 ## Verification status
 
