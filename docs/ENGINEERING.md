@@ -297,6 +297,72 @@ that is the top item under [what's next](#whats-next).
 
 ---
 
+## Confidence bounds on the fit
+
+The engine reports a 95% confidence interval on the fitted degradation slope,
+not just a point estimate.
+
+This exists because the backtest exposed a gap: 63% of decisions had a slope
+that was not positive, reported as a single binary flag. That flag cannot tell
+apart two very different situations — a tyre that genuinely is not slowing, and
+three noisy laps that cannot support any conclusion. Acting on the first is
+reasonable; acting on the second is guessing.
+
+### How it is computed
+
+Standard error of the slope in a simple linear regression:
+
+```
+s²      = SS_residual / (n - 2)
+SE(m)   = sqrt( s² / Σ(x - x̄)² )
+interval = m ± t(0.025, n-2) · SE(m)
+```
+
+Student's t, not the normal. At the engine's 3-sample minimum there is one
+degree of freedom, where t is **12.706** against the normal's 1.96 — using the
+normal there would understate the interval sevenfold and make three noisy laps
+look like a measurement. The critical values are a 30-row table in
+`statistics_helpers.py` rather than a scipy dependency: a large addition for
+one function, and thirty numbers anyone can check against a textbook are more
+auditable than an opaque call.
+
+### What it changes
+
+Three reported states instead of one flag:
+
+| state | meaning |
+|---|---|
+| `positive` | interval entirely above zero — degradation is confidently real |
+| `unclear` | interval spans zero — too few or too noisy samples to tell |
+| `negative` | interval entirely below zero — confidently getting faster |
+
+`laps_to_break_even` gains a range, derived from the ends of the slope
+interval. A shallower slope means a longer wait, so the low end of the slope
+gives the high end of the payback — and when the interval reaches zero the
+payback is **unbounded**, because a tyre that might not be slowing might never
+repay a stop.
+
+The verdict itself is unchanged. Confidence bounds inform the reader; they do
+not silently move the decision, and a test asserts that.
+
+### What it showed
+
+Re-running the backtest, the 63% splits:
+
+| | share of decisions |
+|---|---|
+| positive — degradation confidently real | 14.4% |
+| unclear — cannot tell | 42.3% |
+| negative — confidently getting faster | 43.4% |
+
+That is a more useful picture than "37% measurable". Only **14%** of decisions
+rest on a slope the data confidently supports. And the 43% negative is not
+noise — the interval sits entirely below zero, so fuel burn outweighing tyre
+wear is a measured effect rather than a suspicion. It is the strongest
+argument yet for fuel-burn correction being the next piece of work.
+
+---
+
 ## Simplifications
 
 Deliberate, not oversights:

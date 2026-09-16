@@ -11,6 +11,11 @@ SourceKind = Literal["sample", "historical_replay", "live"]
 
 Verdict = Literal["pit_now", "stay_out"]
 
+# Whether the fitted degradation slope is distinguishable from zero at 95%
+# confidence. "unclear" is the honest answer when the data is too noisy or too
+# sparse to tell, which is different from a tyre that genuinely is not slowing.
+DegradationSignificance = Literal["positive", "unclear", "negative"]
+
 
 class Stint(BaseModel):
     """A continuous run on one set of tyres. Field names match OpenF1 /v1/stints."""
@@ -116,6 +121,14 @@ class DecisionMessage(BaseModel):
     samples_used: int
     samples_seen: int
 
+    # Uncertainty on the slope, at 95% confidence. With few samples the
+    # interval is wide, which is the point: it separates "this tyre is not
+    # slowing" from "we cannot yet tell whether it is".
+    slope_std_error_s_per_lap: float = 0.0
+    slope_ci_low_s_per_lap: float = 0.0
+    slope_ci_high_s_per_lap: float = 0.0
+    degradation_significance: DegradationSignificance = "unclear"
+
     projected_time_current_tyres_s: float
     projected_time_fresh_tyres_s: float
     pit_lane_cost_s: float
@@ -129,6 +142,12 @@ class DecisionMessage(BaseModel):
     # window by a factor of the tyre's age. None when the advantage is not
     # positive.
     laps_to_break_even: float | None = None
+
+    # The same figure at the ends of the slope's confidence interval. `high`
+    # is None when the interval reaches zero or below, because a tyre that
+    # might not be slowing has no upper bound on its payback period.
+    laps_to_break_even_low: float | None = None
+    laps_to_break_even_high: float | None = None
 
     # False when the fitted slope is <= 0, e.g. fuel burn masking tyre wear.
     degradation_is_measurable: bool = True

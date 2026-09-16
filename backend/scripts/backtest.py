@@ -226,6 +226,34 @@ def render(results: list[RaceResult]) -> str:
     total_dec = sum(r.decisions for r in scored)
     out.append("")
     out.append("=" * 78)
+    out.append("SIGNAL QUALITY")
+    out.append("=" * 78)
+    out.append("Where the slope's 95% confidence interval sat relative to zero.")
+    out.append("")
+    counts: dict[str, int] = {}
+    for r in scored:
+        for key, value in r.significance_counts.items():
+            counts[key] = counts.get(key, 0) + value
+    labels = {
+        "positive": "positive  - degradation confidently real",
+        "unclear": "unclear   - interval spans zero, cannot tell",
+        "negative": "negative  - confidently getting faster (fuel burn)",
+    }
+    total_sig = sum(counts.values()) or 1
+    for key in ("positive", "unclear", "negative"):
+        n = counts.get(key, 0)
+        out.append(f"    {labels[key]:<48}{n:>6}  {100*n/total_sig:>5.1f}%")
+    out.append("")
+    out.append(
+        "  A point estimate alone cannot tell the second row from the third."
+    )
+    out.append(
+        "  The confidence interval is what separates 'this tyre is not slowing'"
+    )
+    out.append("  from 'we do not yet have the data to say'.")
+
+    out.append("")
+    out.append("=" * 78)
     out.append("CAVEAT")
     out.append("=" * 78)
     if total_dec:

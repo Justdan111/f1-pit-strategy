@@ -154,6 +154,13 @@ tbody td { padding: 7px 12px; border-top: 1px solid var(--line); }
 .panel-pit_now  .verdict-word { color: var(--error); }
 .panel-stay_out .verdict-word { color: var(--streaming); }
 .verdict-ctx { color: var(--muted); font-size: 13px; font-family: var(--mono); }
+.signif {
+  font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 4px; border: 1px solid currentColor;
+}
+.signif-positive { color: var(--streaming); }
+.signif-unclear  { color: var(--connecting); }
+.signif-negative { color: var(--info); }
 
 .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin: 0; background: var(--line); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
 .metric { background: var(--panel); padding: 9px 12px; }
