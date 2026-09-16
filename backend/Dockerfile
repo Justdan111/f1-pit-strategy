@@ -87,4 +87,4 @@ EXPOSE 8000
 # directly. Without it the shell would hold PID 1, swallow the signal, and every
 # deploy would end in a 10-second SIGKILL instead of a graceful shutdown —
 # meaning open WebSocket streams would be severed rather than closed.
-CMD ["sh", "-c", "uv", "run", "uvicorn", "exec uvicorn backend.main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "exec uvicorn backend.main:app --host 0.0.0.0 --port ${PORT}"]
