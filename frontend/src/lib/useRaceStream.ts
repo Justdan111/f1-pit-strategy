@@ -256,6 +256,23 @@ export function resolveBackendOrigin(): string {
   );
 }
 
+/**
+ * The API key, offered as a WebSocket subprotocol.
+ *
+ * Browsers cannot set headers on a WebSocket handshake, and a query parameter
+ * would be written to the server's access log on every connection. The
+ * subprotocol header is the remaining channel, and is not logged.
+ *
+ * NOT A SECRET. Anything prefixed NEXT_PUBLIC_ is compiled into the browser
+ * bundle and readable by anyone who opens devtools. This deters casual abuse
+ * of a rate-limited backend and allows a key to be rotated; it does not
+ * authenticate users. A public single-page app cannot hold a secret.
+ */
+export function authSubprotocols(): string[] {
+  const key = process.env.NEXT_PUBLIC_API_KEY?.trim();
+  return key ? [`f1key.${key}`] : [];
+}
+
 export function buildStreamUrl(
   sessionKey: string,
   mode: Mode,
@@ -305,7 +322,10 @@ export function useRaceStream() {
   const openSocket = useCallback((sessionKey: string, mode: Mode) => {
     let socket: WebSocket;
     try {
-      socket = new WebSocket(buildStreamUrl(sessionKey, mode));
+      const protocols = authSubprotocols();
+      socket = protocols.length
+        ? new WebSocket(buildStreamUrl(sessionKey, mode), protocols)
+        : new WebSocket(buildStreamUrl(sessionKey, mode));
     } catch (cause) {
       dispatch({
         kind: "transport_error",
