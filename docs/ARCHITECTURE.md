@@ -475,6 +475,12 @@ would be the over-engineering that case was not.
 most container platforms without a mounted volume — the file is lost on every
 deploy and every spin-down. It persists *within* a session, not across them.
 
+In the container the log lives at `/data/decisions.db`. `/app` is created by
+`WORKDIR` and owned by root while the process runs as a non-root user, so the
+default relative path was silently unwritable there — caught by running the
+image rather than by a test, since it is a property of the image and not of the
+code. Mounting a volume at `/data` is what makes the log durable.
+
 ---
 
 ## Deployment topology

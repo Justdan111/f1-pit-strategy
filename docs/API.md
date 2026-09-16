@@ -480,7 +480,7 @@ prefix. Nothing is baked into the container image.
 | variable | default | |
 |---|---|---|
 | `F1_DECISION_LOG_ENABLED` | `true` | |
-| `F1_DECISION_LOG_PATH` | `decisions.db` | **needs a mounted disk to survive a redeploy** |
+| `F1_DECISION_LOG_PATH` | `decisions.db` locally, `/data/decisions.db` in the container | `/app` is root-owned and the container runs as a non-root user, so the log lives in `/data`. **Mount a volume there to survive a redeploy.** |
 | `F1_DECISION_LOG_MAX_RUNS` | `200` | oldest pruned beyond this |
 
 ### Frontend
