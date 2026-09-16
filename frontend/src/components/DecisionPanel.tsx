@@ -1,4 +1,23 @@
-import { DecisionMessage } from "@/lib/types";
+import { DecisionMessage, DegradationSignificance } from "@/lib/types";
+
+/** How much to trust the fitted slope, and why. */
+const SIGNIFICANCE: Record<
+  DegradationSignificance,
+  { label: string; hint: string }
+> = {
+  positive: {
+    label: "measured",
+    hint: "The slope's 95% interval is entirely above zero: the tyre is confidently degrading.",
+  },
+  unclear: {
+    label: "not conclusive",
+    hint: "The slope's 95% interval spans zero. Too few or too noisy samples to tell degradation from none — which is not the same as no degradation.",
+  },
+  negative: {
+    label: "getting faster",
+    hint: "The slope's 95% interval is entirely below zero. Usually fuel burn outweighing tyre wear; this engine does not correct for it.",
+  },
+};
 
 /**
  * The latest decision in full. Never renders a blank panel before the first
@@ -67,6 +86,12 @@ export function DecisionPanel({
           lap {decision.lap} · {decision.compound} · tyre age{" "}
           {decision.tyre_age}
         </span>
+        <span
+          className={`signif signif-${decision.degradation_significance}`}
+          title={SIGNIFICANCE[decision.degradation_significance].hint}
+        >
+          {SIGNIFICANCE[decision.degradation_significance].label}
+        </span>
       </div>
 
       {/* The one-lap comparison DAY2.md specifies. */}
@@ -102,6 +127,20 @@ export function DecisionPanel({
           value={`${sign(decision.current_compound_degradation_s_per_lap)} s/lap`}
           hint="Fitted slope of lap time against tyre age for this compound."
         />
+        {decision.fuel_correction_s_per_lap > 0 && (
+          <Row
+            label="before fuel correction"
+            value={`${sign(decision.raw_degradation_s_per_lap)} s/lap`}
+            hint={`Raw slope of lap time against tyre age, which measures degradation minus fuel burn. ${decision.fuel_correction_s_per_lap.toFixed(4)}s/lap was added back to remove the fuel effect. Shown so the adjustment is auditable rather than invisible.`}
+          />
+        )}
+        <Row
+          label="95% interval"
+          value={`${sign(decision.slope_ci_low_s_per_lap)} … ${sign(
+            decision.slope_ci_high_s_per_lap,
+          )}`}
+          hint={SIGNIFICANCE[decision.degradation_significance].hint}
+        />
         <Row
           label="fresh-tyre advantage"
           value={`${sign(decision.fresh_tyre_advantage_s_per_lap)} s/lap`}
@@ -116,14 +155,43 @@ export function DecisionPanel({
           }
           hint="pit cost / advantage. The number a strategist actually acts on."
         />
+        <Row
+          label="break-even range"
+          value={
+            decision.laps_to_break_even_low === null
+              ? "—"
+              : `${decision.laps_to_break_even_low.toFixed(1)} … ${
+                  decision.laps_to_break_even_high === null
+                    ? "∞"
+                    : decision.laps_to_break_even_high.toFixed(1)
+                }`
+          }
+          hint="The payback period at the ends of the slope's interval. Unbounded when the interval reaches zero: a tyre that might not be slowing might never repay a stop."
+        />
       </dl>
 
-      {!decision.degradation_is_measurable && (
+      {/* One warning, driven by the confidence interval. "Cannot tell" and
+          "confidently not degrading" are different findings and must not
+          share a message. */}
+      {decision.degradation_significance === "unclear" && (
         <p className="warn">
-          <strong>No measurable degradation.</strong> The fitted slope is not
-          positive, so there is no break-even point to report — the verdict
-          below is still computed, but do not read it as a confident
-          recommendation.
+          <strong>Not statistically conclusive.</strong> The slope&apos;s 95%
+          interval spans zero on {decision.samples_used} samples, so the data
+          cannot yet distinguish degradation from none. That is not the same
+          as the tyre not degrading
+          {decision.laps_to_break_even !== null
+            ? " — treat the break-even figure as provisional."
+            : "."}
+        </p>
+      )}
+
+      {decision.degradation_significance === "negative" && (
+        <p className="warn">
+          <strong>Lap times are falling, confidently.</strong> The slope&apos;s
+          95% interval sits entirely below zero, so this is a real effect
+          rather than noise — usually fuel burn outweighing tyre wear as the
+          car lightens. This engine does not correct for fuel, so there is no
+          break-even point to report.
         </p>
       )}
 

@@ -22,6 +22,14 @@ OUT_LAP_PENALTY_S = 18.0
 LAP_TIME_NOISE_S = 0.15
 NOISE_SEED = 20260914
 
+# Fuel burn, so the fixture behaves like real data rather than like an
+# idealised tyre model. Matches the engine's assumed physics for a 58-lap
+# race: 0.03 s/kg x 110 kg / 58 laps. With it present, the engine's fuel
+# correction recovers the true degradation slopes above; without it, the
+# correction would have nothing to remove and would overstate them.
+SAMPLE_RACE_LAPS = 58
+FUEL_EFFECT_S_PER_LAP = 0.03 * 110.0 / SAMPLE_RACE_LAPS
+
 
 def sample_stints() -> list[Stint]:
     """Three stints, two stops. Built fresh each call so callers cannot mutate the fixture."""
@@ -58,8 +66,8 @@ def sample_laps() -> list[Lap]:
     """Lap times matching sample_stints().
 
     Returned as `Lap` models so fixture and real data merge through one code
-    path. Deliberately omits fuel burn: the fixture isolates degradation so
-    the maths stays hand-checkable.
+    path. Includes fuel burn, so the engine's correction has something real to
+    remove and recovers the stated degradation slopes.
     """
     rng = random.Random(NOISE_SEED)
     stints = sample_stints()
@@ -73,6 +81,9 @@ def sample_laps() -> list[Lap]:
         for lap_number in range(stint.lap_start, stint.lap_end + 1):
             tyre_age = stint.tyre_age_at_start + (lap_number - stint.lap_start)
             duration = base + degradation * tyre_age
+            # The car gets lighter and faster as the race goes on, which is a
+            # function of lap number rather than tyre age.
+            duration -= FUEL_EFFECT_S_PER_LAP * (lap_number - 1)
             duration += rng.uniform(-LAP_TIME_NOISE_S, LAP_TIME_NOISE_S)
 
             is_out_lap = lap_number == stint.lap_start and not is_first_stint

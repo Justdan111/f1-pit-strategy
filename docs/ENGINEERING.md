@@ -297,6 +297,175 @@ that is the top item under [what's next](#whats-next).
 
 ---
 
+## Confidence bounds on the fit
+
+The engine reports a 95% confidence interval on the fitted degradation slope,
+not just a point estimate.
+
+This exists because the backtest exposed a gap: 63% of decisions had a slope
+that was not positive, reported as a single binary flag. That flag cannot tell
+apart two very different situations — a tyre that genuinely is not slowing, and
+three noisy laps that cannot support any conclusion. Acting on the first is
+reasonable; acting on the second is guessing.
+
+### How it is computed
+
+Standard error of the slope in a simple linear regression:
+
+```
+s²      = SS_residual / (n - 2)
+SE(m)   = sqrt( s² / Σ(x - x̄)² )
+interval = m ± t(0.025, n-2) · SE(m)
+```
+
+Student's t, not the normal. At the engine's 3-sample minimum there is one
+degree of freedom, where t is **12.706** against the normal's 1.96 — using the
+normal there would understate the interval sevenfold and make three noisy laps
+look like a measurement. The critical values are a 30-row table in
+`statistics_helpers.py` rather than a scipy dependency: a large addition for
+one function, and thirty numbers anyone can check against a textbook are more
+auditable than an opaque call.
+
+### What it changes
+
+Three reported states instead of one flag:
+
+| state | meaning |
+|---|---|
+| `positive` | interval entirely above zero — degradation is confidently real |
+| `unclear` | interval spans zero — too few or too noisy samples to tell |
+| `negative` | interval entirely below zero — confidently getting faster |
+
+`laps_to_break_even` gains a range, derived from the ends of the slope
+interval. A shallower slope means a longer wait, so the low end of the slope
+gives the high end of the payback — and when the interval reaches zero the
+payback is **unbounded**, because a tyre that might not be slowing might never
+repay a stop.
+
+The verdict itself is unchanged. Confidence bounds inform the reader; they do
+not silently move the decision, and a test asserts that.
+
+### What it showed
+
+Re-running the backtest, the 63% splits:
+
+| | share of decisions |
+|---|---|
+| positive — degradation confidently real | 14.4% |
+| unclear — cannot tell | 42.3% |
+| negative — confidently getting faster | 43.4% |
+
+That is a more useful picture than "37% measurable". Only **14%** of decisions
+rest on a slope the data confidently supports. And the 43% negative is not
+noise — the interval sits entirely below zero, so fuel burn outweighing tyre
+wear is a measured effect rather than a suspicion. It is the strongest
+argument yet for fuel-burn correction being the next piece of work.
+
+---
+
+## Fuel-burn correction
+
+A car sheds fuel through a race and gets faster for reasons that have nothing
+to do with tyres. Fitting lap time against tyre age therefore measured
+degradation *minus* fuel effect, which is why real races produced negative
+slopes and the engine declined to recommend a stop 63% of the time.
+
+### Why regression alone cannot fix it
+
+Within a stint, lap number and tyre age increase together — they are perfectly
+collinear. No amount of data separates two perfectly correlated predictors, so
+the fuel term has to come from outside the data as a physical prior.
+
+```
+actual(lap)    = base(age) + k · fuel_remaining(lap)
+fuel_remaining = F₀ − burn·(lap − 1)
+corrected(lap) = actual(lap) + k·burn·(lap − 1)
+
+⇒ corrected_slope = measured_slope + k·burn
+```
+
+Assumed constants, not measured per circuit: **0.03 s of lap time per kg
+carried**, and **110 kg** regulation maximum race fuel. Burn per lap is start
+fuel over race distance, so a 44-lap race gets a +0.075 s/lap correction and a
+78-lap race +0.042. Live mode falls back to an assumed 57 laps, since OpenF1
+reports no lap count for a session in progress.
+
+### Two properties that keep it safe
+
+**The fuel term cancels out of the pit/stay comparison.** Both options run the
+same lap with the same fuel load, so `delta` reduces to `slope · age −
+pit_cost` exactly as before. The comparison improves only through the
+corrected slope — it cannot come to depend on how full the tank is.
+
+**Projected times remain real lap times.** The fit is fuel-free, but
+`predict_actual` adds that lap's fuel load back, so the numbers stay
+comparable to observed lap times and the backtest's accuracy figures remain
+meaningful.
+
+Both slopes are reported — `raw_degradation_s_per_lap` alongside the corrected
+one, plus the correction applied. A silent adjustment is indistinguishable
+from a bug.
+
+### What it did to the results
+
+**Prediction accuracy improved — the non-circular measure:**
+
+| | before | after |
+|---|---|---|
+| model MAE (clean laps) | 0.888s | **0.822s** |
+| model median AE | 0.328s | **0.305s** |
+| persistence MAE (unchanged baseline) | 1.044s | 1.044s |
+
+**Signal quality shifted as predicted:**
+
+| | before | after |
+|---|---|---|
+| positive | 14.4% | 30.1% |
+| unclear | 42.3% | 57.2% |
+| negative | 43.4% | **12.7%** |
+
+Confidently-negative collapsed from 43% to 13%, confirming most of that
+"tyre getting faster" was fuel burn. Note that the largest destination is
+`unclear`, not `positive`: removing the bias moves many slopes to *near* zero,
+where the data genuinely cannot support a strong claim. That is the correct
+outcome, not a disappointing one.
+
+The engine now declines to recommend a stop in only 1 of 8 races, down from 2.
+
+**The gap to actual pit laps got worse, and that is expected.** Like-for-like
+on the four dry races present in both runs, mean absolute gap went from 3.5 to
+6.0 laps — and every recommendation is now *earlier* than the team's stop:
+
+| race | before | after |
+|---|---|---|
+| Jeddah | −1 | −13 |
+| Sakhir | −7 | −7 |
+| Shanghai | +4 | −1 |
+| Silverstone | −2 | −3 |
+
+Detecting more degradation means reaching break-even sooner. Teams pit later
+than the pure-pace optimum because of track position, traffic and the
+undercut — none of which this tool models. So a systematic early bias is the
+expected consequence, and this measure was labelled "not ground truth" for
+exactly this reason. The measure that constitutes validation improved; the one
+that reflects unmodelled strategy moved away. Both are reported.
+
+### The fixture models fuel burn too
+
+The offline fixture now includes a fuel effect, so the correction has
+something real to remove. It demonstrates the whole problem without a network:
+
+| compound | true slope | raw (measured) | corrected |
+|---|---|---|---|
+| HARD | 0.042 | **−0.016** | 0.041 |
+| MEDIUM | 0.070 | 0.006 | 0.063 |
+| SOFT | 0.110 | 0.057 | 0.114 |
+
+The hard tyre reads as *getting faster* uncorrected, while actually degrading
+at 0.042 s/lap — the exact effect seen on real Baku data.
+
+---
+
 ## Simplifications
 
 Deliberate, not oversights:
@@ -307,7 +476,8 @@ Deliberate, not oversights:
   researched per circuit.
 - **Degradation is fitted as a straight line.** Real tyres have a cliff a line
   under-predicts.
-- **No fuel-burn correction** — see decision 3.
+- **Fuel burn is corrected with assumed constants** (0.03 s/kg, 110 kg),
+  not measured per circuit or per team.
 - **Replay pacing is not real lap timing.** A fixed interval, for usability.
 - **One driver at a time.**
 

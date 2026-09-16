@@ -202,9 +202,10 @@ async def stream_race(
     source: TickSource | None = None
     sent = 0
     decisions_sent = 0
-
     # One engine per connection: a fresh connection cannot inherit history.
-    engine = DecisionEngine(settings)
+    # Built after open(), because the fuel correction scales with race
+    # distance and that is only known once the source has described itself.
+    engine: DecisionEngine | None = None
 
     try:
         source = _build_source(
@@ -217,6 +218,10 @@ async def stream_race(
 
         start = await source.open()
         await websocket.send_json(start.model_dump(mode="json"))
+
+        # total_laps is None in live mode, where the engine falls back to an
+        # assumed race distance.
+        engine = DecisionEngine(settings, total_laps=start.total_laps)
 
         # This loop has no idea what is behind `source`.
         async for tick in source.ticks():

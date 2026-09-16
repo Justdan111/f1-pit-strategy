@@ -11,6 +11,9 @@ export type SourceKind = "sample" | "historical_replay" | "live";
 
 export type Verdict = "pit_now" | "stay_out";
 
+/** Whether the fitted slope is distinguishable from zero at 95% confidence. */
+export type DegradationSignificance = "positive" | "unclear" | "negative";
+
 export type Mode = "replay" | "live";
 
 export interface StartMessage {
@@ -42,11 +45,21 @@ export interface DecisionMessage {
   tyre_age: number;
   verdict: Verdict;
 
+  /** Tyre degradation with fuel burn removed. */
   current_compound_degradation_s_per_lap: number;
+  /** The uncorrected slope: degradation minus fuel effect. */
+  raw_degradation_s_per_lap: number;
+  /** Seconds per lap added back. Zero when correction is disabled. */
+  fuel_correction_s_per_lap: number;
   fit_intercept_s: number;
   fit_r_squared: number;
   samples_used: number;
   samples_seen: number;
+
+  slope_std_error_s_per_lap: number;
+  slope_ci_low_s_per_lap: number;
+  slope_ci_high_s_per_lap: number;
+  degradation_significance: DegradationSignificance;
 
   projected_time_current_tyres_s: number;
   projected_time_fresh_tyres_s: number;
@@ -56,6 +69,10 @@ export interface DecisionMessage {
   fresh_tyre_advantage_s_per_lap: number;
   /** null when degradation is not measurably positive. */
   laps_to_break_even: number | null;
+  /** The same figure at the ends of the slope's interval. `high` is null when
+   *  the interval reaches zero: the payback period is then unbounded. */
+  laps_to_break_even_low: number | null;
+  laps_to_break_even_high: number | null;
   degradation_is_measurable: boolean;
   note: string | null;
 }
