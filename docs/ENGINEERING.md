@@ -466,6 +466,57 @@ at 0.042 s/lap — the exact effect seen on real Baku data.
 
 ---
 
+## API key on the WebSocket
+
+`F1_API_KEYS` (comma-separated) gates the stream. Empty disables the check,
+which is right locally and wrong deployed. Several keys at once is what makes
+a key rotatable without downtime.
+
+### Why not a query parameter
+
+Browsers cannot set headers on a WebSocket handshake, so `?api_key=` is the
+obvious channel — and the wrong one. Uvicorn's access log writes the full path
+including the query string, so every connection would write a live key to
+disk. Demonstrated:
+
+```
+GET /health?api_key=would-be-logged HTTP/1.1  200 OK     <- written verbatim
+```
+
+Two channels are accepted instead:
+
+| channel | for |
+|---|---|
+| `Authorization: Bearer <key>` | non-browser clients |
+| `Sec-WebSocket-Protocol: f1key.<key>` | browsers, via `new WebSocket(url, [proto])` |
+
+Neither appears in the access log. When a subprotocol is offered the server
+must echo one back or the browser closes the connection, including on a
+refusal — a rejection the client cannot read is indistinguishable from a
+crash.
+
+Keys are compared with `secrets.compare_digest`, so comparison time does not
+depend on how many leading characters matched. `==` would leak the key one
+character at a time to anyone able to measure response latency.
+
+The key itself is never logged, only whether one was offered and whether it
+was valid. `/health` reports `websocket_auth_required` so a misconfiguration
+is visible from a curl, without echoing the keys.
+
+### What this does and does not buy
+
+**It is not authentication of users.** The frontend's key is a
+`NEXT_PUBLIC_*` value compiled into the browser bundle and readable by anyone
+who opens devtools. A public single-page app cannot hold a secret.
+
+What it does buy is real but narrow: it stops scrapers and casual scripts from
+opening streams against a free-tier backend with a shared OpenF1 rate budget,
+and it makes abuse recoverable, since a key can be rotated without redeploying
+the backend. Anything stronger needs a server-side token endpoint minting
+short-lived credentials, which is a different piece of work.
+
+---
+
 ## Simplifications
 
 Deliberate, not oversights:

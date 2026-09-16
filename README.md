@@ -44,7 +44,7 @@ for exactly what has and hasn't been proven.
 cd backend
 uv sync
 uv run uvicorn backend.main:app --reload    # http://127.0.0.1:8000
-uv run pytest                               # 117 tests, no network
+uv run pytest                               # 136 tests, no network
 uv run python scripts/backtest.py           # score the engine on real races
 ```
 
@@ -83,6 +83,7 @@ Read from the environment at startup; nothing is baked into the image.
 |---|---|---|
 | `PORT` | `8000` | Port to bind. Render sets this. |
 | `F1_ALLOWED_ORIGINS` | *(empty = allow all)* | Comma-separated browser origins. **Set in production.** |
+| `F1_API_KEYS` | *(empty = no auth)* | Comma-separated keys required on the WebSocket. Several allow rotation without downtime. |
 | `F1_OPENF1_BASE_URL` | `https://api.openf1.org/v1` | OpenF1 API root |
 | `F1_REPLAY_TICK_INTERVAL_SECONDS` | `0.5` | Replay pacing |
 | `F1_PIT_LANE_COST_SECONDS` | `22.0` | Pit-lane time loss |
@@ -96,9 +97,15 @@ a `curl` rather than as a frontend that won't connect.
 | Variable | |
 |---|---|
 | `NEXT_PUBLIC_BACKEND_WS_URL` | Backend URL. Accepts `https://`, `http://`, `wss://`, `ws://` or a bare host; the scheme is normalised. |
+| `NEXT_PUBLIC_API_KEY` | API key, if the backend requires one. Sent as a WebSocket subprotocol, never in the URL. |
 
 An `https://` value becomes `wss://` automatically — an HTTPS page cannot open
 a plain `ws://` connection.
+
+> `NEXT_PUBLIC_*` values are compiled into the browser bundle and readable by
+> anyone. The API key deters casual abuse of a rate-limited backend and can be
+> rotated; it does not authenticate users. A public single-page app cannot hold
+> a secret.
 
 ## Deploying
 
