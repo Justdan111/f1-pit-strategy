@@ -44,7 +44,7 @@ for exactly what has and hasn't been proven.
 cd backend
 uv sync
 uv run uvicorn backend.main:app --reload    # http://127.0.0.1:8000
-uv run pytest                               # 136 tests, no network
+uv run pytest                               # 149 tests, no network
 uv run python scripts/backtest.py           # score the engine on real races
 ```
 
@@ -84,6 +84,9 @@ Read from the environment at startup; nothing is baked into the image.
 | `PORT` | `8000` | Port to bind. Render sets this. |
 | `F1_ALLOWED_ORIGINS` | *(empty = allow all)* | Comma-separated browser origins. **Set in production.** |
 | `F1_API_KEYS` | *(empty = no auth)* | Comma-separated keys required on the WebSocket. Several allow rotation without downtime. |
+| `F1_DECISION_LOG_ENABLED` | `true` | Record every decision for later review |
+| `F1_DECISION_LOG_PATH` | `decisions.db` | SQLite file. **Needs a mounted disk to survive a redeploy.** |
+| `F1_DECISION_LOG_MAX_RUNS` | `200` | Oldest runs pruned beyond this |
 | `F1_OPENF1_BASE_URL` | `https://api.openf1.org/v1` | OpenF1 API root |
 | `F1_REPLAY_TICK_INTERVAL_SECONDS` | `0.5` | Replay pacing |
 | `F1_PIT_LANE_COST_SECONDS` | `22.0` | Pit-lane time loss |
@@ -91,6 +94,20 @@ Read from the environment at startup; nothing is baked into the image.
 
 `/health` echoes the effective configuration, so a misconfiguration shows up in
 a `curl` rather than as a frontend that won't connect.
+
+### Reviewing a past race
+
+Every decision is recorded, so a finished stream can be replayed after the fact:
+
+```bash
+curl -s localhost:8000/runs                  # recent streams
+curl -s localhost:8000/runs/1/decisions      # every decision from one, in lap order
+```
+
+> On a host with an ephemeral filesystem — Render's free tier included — this
+> file is lost on every deploy and every spin-down. It persists within a
+> session, not across them. A mounted disk or a hosted database is needed for
+> anything longer-lived.
 
 **Frontend:**
 

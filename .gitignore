@@ -24,3 +24,8 @@ docs/DAY*.md
 docs/DAY*.MD
 docs/PROJECT.md
 docs/SPEC.md
+
+# Local decision log
+*.db
+*.db-wal
+*.db-shm

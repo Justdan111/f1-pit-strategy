@@ -24,3 +24,9 @@ services:
       # leaves the stream open to anyone.
       - key: F1_API_KEYS
         sync: false
+      # The decision log lives on the container filesystem, which the free
+      # plan wipes on every deploy and every spin-down. It is useful for
+      # reviewing a race just watched, not for keeping a history. A mounted
+      # disk (paid) or a hosted database would be needed for that.
+      - key: F1_DECISION_LOG_PATH
+        value: /tmp/decisions.db
