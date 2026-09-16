@@ -96,6 +96,10 @@ class RaceResult:
     recommended_pit_lap: int | None = None
     decisions: int = 0
     decisions_with_measurable_degradation: int = 0
+    # How the slope's 95% interval sat relative to zero. Splits the blunt
+    # "not measurable" count into a tyre that genuinely is not slowing versus
+    # data too sparse or noisy to tell.
+    significance_counts: dict[str, int] = field(default_factory=dict)
     counterfactual: Counterfactual | None = None
     skipped_reason: str | None = None
 
@@ -331,6 +335,8 @@ async def backtest_session(
         result.decisions += 1
         if decision.degradation_is_measurable:
             result.decisions_with_measurable_degradation += 1
+        key = decision.degradation_significance
+        result.significance_counts[key] = result.significance_counts.get(key, 0) + 1
 
         # The prediction is for the NEXT lap, so it is only scoreable if that
         # lap exists and was run on the same tyre set.

@@ -24,7 +24,8 @@ import logging
 from dataclasses import dataclass, field
 
 from .config import Settings, get_settings
-from .models import DecisionMessage, TickMessage
+from .models import DecisionMessage, DegradationSignificance, TickMessage
+from .statistics_helpers import CONFIDENCE_LEVEL, t_critical_95
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +49,26 @@ class DegradationFit:
     r_squared: float
     samples_used: int
     samples_seen: int
+    slope_std_error: float = 0.0
+    slope_ci_low: float = 0.0
+    slope_ci_high: float = 0.0
 
     def predict(self, tyre_age: float) -> float:
         return self.intercept_s + self.slope_s_per_lap * tyre_age
+
+    @property
+    def significance(self) -> DegradationSignificance:
+        """Whether the slope is distinguishable from zero.
+
+        An interval spanning zero means "cannot tell", which is a different
+        statement from "the tyre is not degrading" and must not be reported as
+        though it were.
+        """
+        if self.slope_ci_low > 0:
+            return "positive"
+        if self.slope_ci_high < 0:
+            return "negative"
+        return "unclear"
 
 
 @dataclass
@@ -180,6 +198,18 @@ class DecisionEngine:
         # A flat line fits identical lap times perfectly.
         r_squared = 1.0 if ss_total == 0 else 1.0 - (ss_residual / ss_total)
 
+        # Standard error of the slope: sqrt(residual variance / spread in x).
+        # Needs n - 2 degrees of freedom, which the 3-sample minimum
+        # guarantees. Wide intervals on few samples are correct, not a defect.
+        degrees_of_freedom = n - 2
+        if degrees_of_freedom >= 1:
+            residual_variance = ss_residual / degrees_of_freedom
+            std_error = (residual_variance / variance_x) ** 0.5
+            margin = t_critical_95(degrees_of_freedom) * std_error
+        else:
+            std_error = 0.0
+            margin = 0.0
+
         return DegradationFit(
             compound=compound,
             slope_s_per_lap=slope,
@@ -187,6 +217,9 @@ class DecisionEngine:
             r_squared=r_squared,
             samples_used=n,
             samples_seen=seen,
+            slope_std_error=std_error,
+            slope_ci_low=slope - margin,
+            slope_ci_high=slope + margin,
         )
 
     def _decide(self, tick: TickMessage, fit: DegradationFit) -> DecisionMessage:
@@ -204,11 +237,41 @@ class DecisionEngine:
         measurable = advantage > 0
         break_even = (pit_cost / advantage) if measurable else None
 
+        # The same payback period at the ends of the slope's interval. A
+        # shallower slope means a longer wait, so the LOW end of the slope
+        # gives the HIGH end of the payback. When that end reaches zero there
+        # is no upper bound: a tyre that might not be slowing might never pay
+        # a stop back.
+        break_even_low: float | None = None
+        break_even_high: float | None = None
+        if tick.tyre_age > 0:
+            if fit.slope_ci_high > 0:
+                break_even_low = pit_cost / (fit.slope_ci_high * tick.tyre_age)
+            if fit.slope_ci_low > 0:
+                break_even_high = pit_cost / (fit.slope_ci_low * tick.tyre_age)
+
+        significance = fit.significance
+
         note: str | None = None
-        if not measurable:
+        if significance == "unclear" and measurable:
+            note = (
+                f"Degradation on {fit.compound} is not distinguishable from zero: "
+                f"the slope is {fit.slope_s_per_lap:+.4f} s/lap but its 95% interval "
+                f"[{fit.slope_ci_low:+.4f}, {fit.slope_ci_high:+.4f}] spans zero, on "
+                f"{fit.samples_used} samples. The break-even figure is arithmetic on "
+                "a number the data does not yet support — treat it as provisional, "
+                "not as a recommendation."
+            )
+        elif not measurable:
             if fit.slope_s_per_lap <= 0:
+                confidence = (
+                    "confidently so"
+                    if significance == "negative"
+                    else "though the data is too noisy to be sure"
+                )
                 note = (
-                    f"No measurable degradation on {fit.compound}: fitted slope is "
+                    f"No measurable degradation on {fit.compound} ({confidence}): "
+                    f"fitted slope is "
                     f"{fit.slope_s_per_lap:+.4f} s/lap. Lap times are not rising with "
                     "tyre age. Fuel burn (~-0.03 s/lap as the car lightens) can mask "
                     "or exceed real degradation; this engine does not correct for it. "
@@ -242,6 +305,16 @@ class DecisionEngine:
             delta_s=round(delta, 3),
             fresh_tyre_advantage_s_per_lap=round(advantage, 4),
             laps_to_break_even=None if break_even is None else round(break_even, 2),
+            laps_to_break_even_low=(
+                None if break_even_low is None else round(break_even_low, 2)
+            ),
+            laps_to_break_even_high=(
+                None if break_even_high is None else round(break_even_high, 2)
+            ),
+            slope_std_error_s_per_lap=round(fit.slope_std_error, 5),
+            slope_ci_low_s_per_lap=round(fit.slope_ci_low, 4),
+            slope_ci_high_s_per_lap=round(fit.slope_ci_high, 4),
+            degradation_significance=significance,
             degradation_is_measurable=measurable,
             note=note,
         )
