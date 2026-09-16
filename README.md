@@ -141,5 +141,10 @@ configuration is needed.
 
 FastAPI · Next.js · [OpenF1](https://openf1.org) · Docker · Render · Vercel
 
-Architecture, the decision maths, and design rationale:
-[docs/ENGINEERING.md](docs/ENGINEERING.md).
+## Documentation
+
+| | |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How it works: components, the `TickSource` seam, connection lifecycle, concurrency and failure models, deployment |
+| [docs/API.md](docs/API.md) | Every endpoint, the message protocol, error codes, full configuration |
+| [docs/ENGINEERING.md](docs/ENGINEERING.md) | Why the numbers are what they are, and what has actually been verified |
