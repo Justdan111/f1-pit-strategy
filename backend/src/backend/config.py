@@ -49,6 +49,15 @@ class Settings(BaseSettings):
         """Accepted keys. Empty list means the WebSocket is open."""
         return [k.strip() for k in self.api_keys.split(",") if k.strip()]
 
+    # --- Decision log ---
+    # Every decision is recorded so a race can be reviewed after the fact.
+    # Best-effort: a storage failure must never take a live stream down.
+    decision_log_enabled: bool = True
+    decision_log_path: str = "decisions.db"
+    # Oldest runs are pruned beyond this, so an unattended service does not
+    # grow without bound.
+    decision_log_max_runs: int = 200
+
     # --- Live mode ---
     # OpenF1 serves live data from 30 minutes before a session to 30 after.
     # Do not widen this to make local testing easier.

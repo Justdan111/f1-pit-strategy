@@ -517,6 +517,71 @@ short-lived credentials, which is a different piece of work.
 
 ---
 
+## Persisted decision log
+
+Every decision is recorded, so a finished race can be reviewed rather than
+only watched live.
+
+```
+GET /runs                  recent streams, newest first
+GET /runs/{id}/decisions   every decision from one run, in lap order
+```
+
+### Choices worth explaining
+
+**SQLite, and no storage interface.** The workload is one stream at a time at
+roughly one row per lap — a single file handles that without a server to run,
+back up or pay for. And unlike `TickSource`, which was written as an interface
+with one implementation because a second was known and dated, a second storage
+backend here is speculative. A concrete class with a narrow surface is the
+honest call; an ABC added for symmetry would be the over-engineering the Day 1
+case was not.
+
+**Writes happen in a worker thread.** `sqlite3` is synchronous, and calling it
+from the event loop would stall every other connected client for the duration
+of the write. On a server whose whole job is streaming, that is the one thing
+it must not do, so every operation goes through `asyncio.to_thread` behind a
+lock, with WAL mode so the read endpoints work while a stream writes.
+
+**The full message is stored as JSON**, alongside a handful of indexed columns
+(`lap`, `verdict`, `compound`, `tyre_age`). `DecisionMessage` gained fields
+three times in one week — confidence bounds, then fuel correction — and a
+column per field would have meant a migration each time. The log's job is to
+reproduce what was actually sent, whatever shape it was in.
+
+**Failures are swallowed, not raised.** The log records a race; it is not part
+of serving one. A full, read-only or missing disk degrades to "no log" rather
+than ending a stream somebody is watching — the same containment principle as
+the decision engine's own. If the log cannot even be opened, the service
+starts anyway and `/runs` reports `enabled: false`.
+
+**Runs are pruned** beyond `F1_DECISION_LOG_MAX_RUNS`, with the decisions
+cascading, so an unattended service cannot grow without bound.
+
+### Durability, plainly
+
+On a host with an ephemeral filesystem — Render's free tier, and most
+container platforms without a mounted volume — the file is lost on every
+deploy and every spin-down after 15 minutes idle. It persists **within** a
+session, not across them. That is enough to review a race you just watched,
+and not enough to build a history. A mounted disk or a hosted database is
+needed for the latter.
+
+### What gets recorded
+
+The end reason is recorded too, so a partially-watched race is not mistaken
+for a complete one:
+
+| reason | |
+|---|---|
+| `completed` | the stream reached its end message |
+| `client_disconnected` | the viewer closed the tab mid-race |
+| `no_live_session` | live mode found nothing running |
+| `error:<code>` | the stream failed, with the code |
+| `internal_error` | an unexpected exception |
+
+---
+
 ## Simplifications
 
 Deliberate, not oversights:

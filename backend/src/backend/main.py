@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -23,6 +23,7 @@ from .models import (
 from .openf1_client import OpenF1Client, OpenF1Error
 from .replay import ReplayTickSource
 from .sample_data import SAMPLE_SESSION_KEY, sample_stints
+from .storage import DecisionStore
 from .tick_source import TickSource, TickSourceError
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -33,12 +34,28 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Own one pooled HTTP client for the process, not one per request."""
     settings = get_settings()
+    store: DecisionStore | None = None
+    if settings.decision_log_enabled:
+        store = DecisionStore(
+            settings.decision_log_path, max_runs=settings.decision_log_max_runs
+        )
+        try:
+            await store.open()
+        except Exception:
+            # An unusable log must not stop the service from streaming.
+            logger.exception("Could not open the decision log; continuing without it.")
+            store = None
+
     async with httpx.AsyncClient(headers={"Accept": "application/json"}) as http:
         app.state.settings = settings
         app.state.http = http
         app.state.openf1 = OpenF1Client(http, settings)
+        app.state.store = store
         logger.info("Startup complete. OpenF1 base URL: %s", settings.openf1_base_url)
         yield
+
+    if store is not None:
+        await store.close()
     logger.info("Shutdown complete.")
 
 
@@ -115,6 +132,28 @@ async def health() -> dict[str, object]:
 async def get_sample_stints() -> list[Stint]:
     """Debug only: raw sample stints, for comparing against emitted ticks."""
     return sample_stints()
+
+
+@app.get("/runs")
+async def list_runs(limit: int = Query(50, ge=1, le=200)) -> dict[str, object]:
+    """Recent recorded streams, newest first."""
+    store: DecisionStore | None = app.state.store
+    if store is None:
+        return {"enabled": False, "runs": []}
+    runs = await store.list_runs(limit)
+    return {"enabled": True, "runs": [vars(r) for r in runs]}
+
+
+@app.get("/runs/{run_id}/decisions")
+async def get_run_decisions(run_id: int) -> dict[str, object]:
+    """Every decision from one run, in lap order: a race to review after the fact."""
+    store: DecisionStore | None = app.state.store
+    if store is None:
+        raise HTTPException(status_code=404, detail="The decision log is disabled.")
+    run = await store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"No run {run_id}.")
+    return {"run": vars(run), "decisions": await store.get_decisions(run_id)}
 
 
 def _build_source(
@@ -239,6 +278,8 @@ async def stream_race(
     source: TickSource | None = None
     sent = 0
     decisions_sent = 0
+    run_id: int | None = None
+    _close_reason = "incomplete"
     # One engine per connection: a fresh connection cannot inherit history.
     # Built after open(), because the fuel correction scales with race
     # distance and that is only known once the source has described itself.
@@ -260,6 +301,10 @@ async def stream_race(
         # assumed race distance.
         engine = DecisionEngine(settings, total_laps=start.total_laps)
 
+        store: DecisionStore | None = websocket.app.state.store
+        if store is not None:
+            run_id = await store.start_run(start)
+
         # This loop has no idea what is behind `source`.
         async for tick in source.ticks():
             await websocket.send_json(tick.model_dump(mode="json"))
@@ -269,6 +314,10 @@ async def stream_race(
             if decision is not None:
                 await websocket.send_json(decision.model_dump(mode="json"))
                 decisions_sent += 1
+                # Recorded after sending, so persistence can never delay the
+                # client. Failures inside the store are swallowed there.
+                if store is not None and run_id is not None:
+                    await store.record_decision(run_id, decision)
 
         await websocket.send_json(
             EndMessage(
@@ -278,8 +327,10 @@ async def stream_race(
                 reason="completed",
             ).model_dump(mode="json")
         )
+        _close_reason = "completed"
 
     except WebSocketDisconnect:
+        _close_reason = "client_disconnected"
         logger.info(
             "Client disconnected from session_key=%s after %d ticks, %d decisions.",
             session_key,
@@ -290,15 +341,18 @@ async def stream_race(
     except NoLiveSessionError as exc:
         # Not an error: the request worked and the answer was "no race is
         # happening", which is live mode's normal state.
+        _close_reason = "no_live_session"
         logger.info("No live session for session_key=%s: %s", session_key, exc.detail)
         await _send_no_live_session(websocket, exc)
 
     except (TickSourceError, OpenF1Error) as exc:
+        _close_reason = f"error:{exc.code}"
         detail = getattr(exc, "detail", str(exc))
         logger.warning("Stream failed for session_key=%s: %s", session_key, detail)
         await _send_error(websocket, detail=detail, code=exc.code)
 
     except Exception as exc:  # noqa: BLE001 - last line of defence
+        _close_reason = "internal_error"
         logger.exception("Unexpected error streaming session_key=%s", session_key)
         await _send_error(
             websocket,
@@ -307,6 +361,14 @@ async def stream_race(
         )
 
     finally:
+        store = websocket.app.state.store
+        if store is not None and run_id is not None:
+            await store.finish_run(
+                run_id,
+                total_ticks=sent,
+                total_decisions=decisions_sent,
+                reason=_close_reason,
+            )
         if source is not None:
             await source.close()
         await _close_quietly(websocket)
@@ -373,6 +435,8 @@ async def root() -> JSONResponse:
             "endpoints": {
                 "health": "GET /health",
                 "sample_stints_debug": "GET /race/sample/stints",
+                "runs": "GET /runs",
+                "run_decisions": "GET /runs/{id}/decisions",
                 "stream": "WS /ws/race/{session_key}?mode=replay|live",
                 "live": f"WS /ws/race/{LATEST_SESSION_KEY}?mode=live",
             },
