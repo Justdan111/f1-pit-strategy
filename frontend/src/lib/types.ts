@@ -45,7 +45,12 @@ export interface DecisionMessage {
   tyre_age: number;
   verdict: Verdict;
 
+  /** Tyre degradation with fuel burn removed. */
   current_compound_degradation_s_per_lap: number;
+  /** The uncorrected slope: degradation minus fuel effect. */
+  raw_degradation_s_per_lap: number;
+  /** Seconds per lap added back. Zero when correction is disabled. */
+  fuel_correction_s_per_lap: number;
   fit_intercept_s: number;
   fit_r_squared: number;
   samples_used: number;

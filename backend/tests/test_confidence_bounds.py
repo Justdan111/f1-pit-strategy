@@ -56,9 +56,9 @@ def test_t_needs_at_least_one_degree_of_freedom():
 # --- the interval ---------------------------------------------------------
 
 
-def test_a_perfect_fit_has_a_zero_width_interval(settings):
+def test_a_perfect_fit_has_a_zero_width_interval(raw_settings):
     """No residuals means no uncertainty about the slope."""
-    fit = feed(settings, [(n, 90.0 + 0.1 * n) for n in range(10)])
+    fit = feed(raw_settings, [(n, 90.0 + 0.1 * n) for n in range(10)])
     assert fit is not None
     assert fit.slope_std_error == pytest.approx(0.0, abs=1e-9)
     assert fit.slope_ci_low == pytest.approx(fit.slope_s_per_lap, abs=TOL)
@@ -119,11 +119,11 @@ def test_clear_degradation_is_reported_positive(settings):
     assert fit.slope_ci_low > 0
 
 
-def test_clear_negative_slope_is_reported_negative(settings):
+def test_clear_negative_slope_is_reported_negative(raw_settings):
     """Fuel burn outweighing wear, confidently."""
     rng = random.Random(5)
     fit = feed(
-        settings,
+        raw_settings,
         [(n, 105.0 - 0.1 * n + rng.uniform(-0.1, 0.1)) for n in range(20)],
     )
     assert fit is not None
@@ -131,16 +131,16 @@ def test_clear_negative_slope_is_reported_negative(settings):
     assert fit.slope_ci_high < 0
 
 
-def test_noise_around_a_flat_line_is_unclear_not_a_verdict(settings):
+def test_noise_around_a_flat_line_is_unclear_not_a_verdict(raw_settings):
     """The case this feature exists for: no trend, but plenty of scatter."""
     rng = random.Random(13)
-    fit = feed(settings, [(n, 95.0 + rng.uniform(-1.0, 1.0)) for n in range(20)])
+    fit = feed(raw_settings, [(n, 95.0 + rng.uniform(-1.0, 1.0)) for n in range(20)])
     assert fit is not None
     assert fit.significance == "unclear"
     assert fit.slope_ci_low <= 0 <= fit.slope_ci_high
 
 
-def test_three_samples_are_not_enough_to_be_confident(settings):
+def test_three_samples_are_not_enough_to_be_confident(raw_settings):
     """A real slope on the minimum sample count must still read as unclear.
 
     With 3 points there is 1 degree of freedom and t is 12.7, so unless the
@@ -148,7 +148,7 @@ def test_three_samples_are_not_enough_to_be_confident(settings):
     three laps as a measurement would be the exact overconfidence this is
     meant to prevent.
     """
-    fit = feed(settings, [(0, 90.0), (1, 90.3), (2, 90.1)])
+    fit = feed(raw_settings, [(0, 90.0), (1, 90.3), (2, 90.1)])
     assert fit is not None
     assert fit.samples_used == 3
     assert fit.significance == "unclear"
@@ -184,9 +184,9 @@ def test_decision_carries_the_interval_and_a_break_even_range(settings):
     )
 
 
-def test_an_unclear_slope_reports_an_unbounded_payback(settings):
+def test_an_unclear_slope_reports_an_unbounded_payback(raw_settings):
     """If the tyre might not be slowing, the stop might never pay back."""
-    engine = DecisionEngine(settings)
+    engine = DecisionEngine(raw_settings)
     rng = random.Random(4)
     decision = None
     for n in range(20):
@@ -201,8 +201,8 @@ def test_an_unclear_slope_reports_an_unbounded_payback(settings):
     )
 
 
-def test_an_unclear_slope_says_so_in_the_note(settings):
-    engine = DecisionEngine(settings)
+def test_an_unclear_slope_says_so_in_the_note(raw_settings):
+    engine = DecisionEngine(raw_settings)
     rng = random.Random(4)
     decision = None
     for n in range(20):

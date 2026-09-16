@@ -67,6 +67,26 @@ class Settings(BaseSettings):
     # Read the curve at age 1, not 0: lap one on a new set is not its best.
     fresh_tyre_reference_age: float = 1.0
 
+    # --- Fuel-burn correction ---
+    # A car sheds fuel through a race and gets faster for reasons that have
+    # nothing to do with tyres. Within a stint, fuel load and tyre age are
+    # perfectly collinear, so regression alone can never separate them; the
+    # fuel term has to come from outside the data.
+    #
+    # ASSUMED CONSTANTS, not measured per circuit. Roughly 0.03 s of lap time
+    # per kg carried is the standard figure, and 110 kg is the regulation
+    # maximum race fuel load. Both are simplifications: real consumption
+    # varies with circuit, and teams rarely start on a full load.
+    fuel_correction_enabled: bool = True
+    fuel_effect_s_per_kg: float = 0.03
+    race_start_fuel_kg: float = 110.0
+
+    # Burn per lap is start fuel divided by race distance, so the correction
+    # is larger at short races. Used when the race length is not known --
+    # notably live mode, where OpenF1 reports no lap count for a session in
+    # progress. Roughly the middle of the calendar.
+    assumed_race_laps: int = 57
+
     # --- Fit hygiene ---
     # Drop laps this much slower than the best lap at a similar tyre age.
     # Needed against real data: on Baku 2025, lap 1 was +25.7s (standing

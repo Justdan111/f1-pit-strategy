@@ -18,6 +18,19 @@ def settings() -> Settings:
     return Settings()
 
 
+@pytest.fixture
+def raw_settings() -> Settings:
+    """Production settings with fuel correction off.
+
+    For tests about the regression and the pit arithmetic themselves, where
+    the expected values were computed by hand from a stated line. Fuel
+    correction shifts every slope by a constant; folding that into each
+    hand-derived number would obscure what those tests actually check. The
+    correction has its own tests in test_fuel_correction.py.
+    """
+    return Settings(fuel_correction_enabled=False)
+
+
 def utc(text: str) -> datetime:
     """Parse an ISO-8601 timestamp into an aware UTC datetime."""
     return datetime.fromisoformat(text).astimezone(timezone.utc)

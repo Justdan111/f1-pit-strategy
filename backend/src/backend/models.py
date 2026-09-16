@@ -115,7 +115,17 @@ class DecisionMessage(BaseModel):
 
     verdict: Verdict
 
+    # Tyre degradation with fuel burn removed. Before fuel correction this
+    # field silently meant "degradation minus fuel effect", which is why it
+    # came out negative on most real races.
     current_compound_degradation_s_per_lap: float
+    # The uncorrected slope, reported so the correction is auditable rather
+    # than an invisible adjustment.
+    raw_degradation_s_per_lap: float = 0.0
+    # Seconds per lap added back. Zero when correction is disabled, in which
+    # case the two slopes above are equal.
+    fuel_correction_s_per_lap: float = 0.0
+
     fit_intercept_s: float
     fit_r_squared: float
     samples_used: int
