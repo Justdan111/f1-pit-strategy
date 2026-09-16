@@ -21,8 +21,8 @@ def tick(lap, age, compound, duration, out=False):
     )
 
 
-def decide(settings, samples, final):
-    engine = DecisionEngine(settings)
+def decide(raw_settings, samples, final):
+    engine = DecisionEngine(raw_settings)
     for sample in samples:
         engine.observe(sample)
     return engine.observe(final)
@@ -35,9 +35,9 @@ def decide(settings, samples, final):
 #   delta     = 90.40 - 112.08    = -21.68  -> stay_out
 #   breakeven = 22 / 0.32         = 68.75 laps
 
-def test_nearly_new_tyre_says_stay_out(settings):
+def test_nearly_new_tyre_says_stay_out(raw_settings):
     decision = decide(
-        settings,
+        raw_settings,
         [tick(n + 1, n, "MEDIUM", 90.0 + 0.08 * n) for n in range(0, 4)],
         tick(5, 4, "MEDIUM", 90.0 + 0.08 * 4),
     )
@@ -56,9 +56,9 @@ def test_nearly_new_tyre_says_stay_out(settings):
 # --- B: worn SOFT, 89.0 + 0.11 * age, current age 19 ----------------------
 #   advantage = 0.11 * 19 = 2.09 s/lap ; breakeven = 22 / 2.09 = 10.53 laps
 
-def test_worn_tyre_still_says_stay_out_but_break_even_is_near(settings):
+def test_worn_tyre_still_says_stay_out_but_break_even_is_near(raw_settings):
     decision = decide(
-        settings,
+        raw_settings,
         [tick(40 + n, n, "SOFT", 89.0 + 0.11 * n) for n in (2, 6, 10, 14, 18)],
         tick(58, 19, "SOFT", 89.0 + 0.11 * 19),
     )
@@ -74,9 +74,9 @@ def test_worn_tyre_still_says_stay_out_but_break_even_is_near(settings):
 # Guards a real bug: an outlier rule keyed to the fastest lap of the stint
 # discarded every legitimately degraded lap and emitted no decision at all.
 
-def test_severe_degradation_actually_flips_the_verdict_to_pit(settings):
+def test_severe_degradation_actually_flips_the_verdict_to_pit(raw_settings):
     decision = decide(
-        settings,
+        raw_settings,
         [tick(10 + n, n, "SOFT", 95.0 + 1.5 * n) for n in (10, 14, 18)],
         tick(30, 20, "SOFT", 95.0 + 1.5 * 20),
     )
@@ -91,9 +91,9 @@ def test_severe_degradation_actually_flips_the_verdict_to_pit(settings):
 
 # --- D: negative slope (fuel burn outpacing wear), 105.0 - 0.05 * age -----
 
-def test_negative_degradation_is_reported_honestly_not_hidden(settings):
+def test_negative_degradation_is_reported_honestly_not_hidden(raw_settings):
     decision = decide(
-        settings,
+        raw_settings,
         [tick(1 + n, n, "HARD", 105.0 - 0.05 * n) for n in (0, 10, 20)],
         tick(30, 25, "HARD", 105.0 - 0.05 * 25),
     )
@@ -110,8 +110,8 @@ def test_negative_degradation_is_reported_honestly_not_hidden(settings):
 
 # --- E: not enough data ---------------------------------------------------
 
-def test_no_decision_until_three_clean_samples_exist(settings):
-    engine = DecisionEngine(settings)
+def test_no_decision_until_three_clean_samples_exist(raw_settings):
+    engine = DecisionEngine(raw_settings)
     results = [
         engine.observe(tick(1, 0, "MEDIUM", 90.00)),
         engine.observe(tick(2, 1, "MEDIUM", 90.08)),
@@ -120,9 +120,9 @@ def test_no_decision_until_three_clean_samples_exist(settings):
     assert [r is None for r in results] == [True, True, False]
 
 
-def test_tick_without_a_lap_time_is_skipped_not_counted(settings):
+def test_tick_without_a_lap_time_is_skipped_not_counted(raw_settings):
     """A null lap_duration must not become a sample."""
-    engine = DecisionEngine(settings)
+    engine = DecisionEngine(raw_settings)
     assert engine.observe(tick(1, 0, "MEDIUM", None)) is None
     assert engine.observe(tick(2, 1, "MEDIUM", 90.08)) is None
     assert engine.observe(tick(3, 2, "MEDIUM", 90.16)) is None
@@ -134,8 +134,8 @@ def test_tick_without_a_lap_time_is_skipped_not_counted(settings):
 # Guards a real bug: with only the "similar tyre age" rule, a fully
 # contaminated neighbourhood let lap 1 survive and invert the fitted slope.
 
-def test_outliers_are_excluded_and_the_true_slope_is_recovered(settings):
-    engine = DecisionEngine(settings)
+def test_outliers_are_excluded_and_the_true_slope_is_recovered(raw_settings):
+    engine = DecisionEngine(raw_settings)
     clean = [tick(n + 1, n, "MEDIUM", 90.0 + 0.10 * n) for n in range(0, 10)]
     noise = [
         tick(90, 0, "MEDIUM", 108.0, out=True),   # out-lap, flagged
@@ -153,9 +153,9 @@ def test_outliers_are_excluded_and_the_true_slope_is_recovered(settings):
     assert decision.fit_r_squared == pytest.approx(1.0, abs=TOL)
 
 
-def test_contamination_at_low_tyre_age_does_not_invert_the_slope(settings):
+def test_contamination_at_low_tyre_age_does_not_invert_the_slope(raw_settings):
     """Reproduces the real Baku 2025 shape: laps 1-4 all contaminated."""
-    engine = DecisionEngine(settings)
+    engine = DecisionEngine(raw_settings)
     engine.observe(tick(1, 0, "HARD", 129.1))   # standing start
     engine.observe(tick(2, 1, "HARD", 164.2))   # safety car
     engine.observe(tick(3, 2, "HARD", 159.1))   # safety car
@@ -171,17 +171,17 @@ def test_contamination_at_low_tyre_age_does_not_invert_the_slope(settings):
     assert decision.samples_used < decision.samples_seen
 
 
-def test_all_samples_at_one_tyre_age_cannot_be_fitted(settings):
+def test_all_samples_at_one_tyre_age_cannot_be_fitted(raw_settings):
     """A vertical scatter has no slope — expect None, not a division error."""
-    engine = DecisionEngine(settings)
+    engine = DecisionEngine(raw_settings)
     for n in range(5):
         result = engine.observe(tick(n + 1, 7, "HARD", 95.0 + n * 0.01))
     assert result is None
 
 
-def test_each_compound_is_fitted_independently(settings):
+def test_each_compound_is_fitted_independently(raw_settings):
     """A new compound starts from zero samples, even mid-race."""
-    engine = DecisionEngine(settings)
+    engine = DecisionEngine(raw_settings)
     for n in range(6):
         engine.observe(tick(n + 1, n, "HARD", 95.0 + 0.05 * n))
     # First lap on a different compound: no samples for it yet.

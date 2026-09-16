@@ -127,6 +127,13 @@ export function DecisionPanel({
           value={`${sign(decision.current_compound_degradation_s_per_lap)} s/lap`}
           hint="Fitted slope of lap time against tyre age for this compound."
         />
+        {decision.fuel_correction_s_per_lap > 0 && (
+          <Row
+            label="before fuel correction"
+            value={`${sign(decision.raw_degradation_s_per_lap)} s/lap`}
+            hint={`Raw slope of lap time against tyre age, which measures degradation minus fuel burn. ${decision.fuel_correction_s_per_lap.toFixed(4)}s/lap was added back to remove the fuel effect. Shown so the adjustment is auditable rather than invisible.`}
+          />
+        )}
         <Row
           label="95% interval"
           value={`${sign(decision.slope_ci_low_s_per_lap)} … ${sign(

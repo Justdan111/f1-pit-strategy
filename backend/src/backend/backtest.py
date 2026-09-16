@@ -318,7 +318,9 @@ async def backtest_session(
     clean = _clean_next_laps(ticks)
     by_lap = {t.lap: t for t in ticks}
 
-    engine = DecisionEngine(settings)
+    # The race distance is known for a finished race, so the fuel
+    # correction is sized to it rather than to the assumed default.
+    engine = DecisionEngine(settings, total_laps=result.total_laps)
     decisions: list[DecisionMessage] = []
     # Running mean per compound, as an independent baseline predictor.
     compound_totals: dict[str, list[float]] = {}

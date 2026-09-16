@@ -37,6 +37,10 @@ class Sample:
     tyre_age: int
     lap_duration_s: float
     is_pit_out_lap: bool
+    # Needed for the fuel correction, which depends on race position rather
+    # than tyre age: a fresh set on lap 40 carries far less fuel than the
+    # same fresh set on lap 5.
+    lap: int = 0
 
 
 @dataclass(frozen=True)
@@ -52,9 +56,26 @@ class DegradationFit:
     slope_std_error: float = 0.0
     slope_ci_low: float = 0.0
     slope_ci_high: float = 0.0
+    # Seconds per lap added back to undo fuel burn. Zero when correction is
+    # disabled, in which case the slope means what it did before: degradation
+    # minus fuel effect.
+    fuel_correction_s_per_lap: float = 0.0
 
     def predict(self, tyre_age: float) -> float:
+        """Fuel-free lap time: what this tyre would do carrying no fuel.
+
+        Not comparable to a real lap time. Use predict_actual for that.
+        """
         return self.intercept_s + self.slope_s_per_lap * tyre_age
+
+    def predict_actual(self, tyre_age: float, lap: int) -> float:
+        """Predicted real lap time, with the fuel the car carries on that lap."""
+        return self.predict(tyre_age) - self.fuel_correction_s_per_lap * (lap - 1)
+
+    @property
+    def raw_slope_s_per_lap(self) -> float:
+        """The uncorrected slope, which is degradation minus fuel effect."""
+        return self.slope_s_per_lap - self.fuel_correction_s_per_lap
 
     @property
     def significance(self) -> DegradationSignificance:
@@ -84,9 +105,31 @@ class DecisionEngine:
     connection, so live mode reuses it unmodified.
     """
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        total_laps: int | None = None,
+    ) -> None:
         self._settings = settings or get_settings()
         self._history: dict[str, _CompoundHistory] = {}
+        self._total_laps = total_laps
+
+    @property
+    def fuel_correction_s_per_lap(self) -> float:
+        """Lap time to add back per lap to remove fuel burn.
+
+        Zero when disabled. Otherwise the fuel effect per kg times burn per
+        lap, which is start fuel over race distance -- so a shorter race gets
+        a larger correction, because it burns fuel faster.
+        """
+        if not self._settings.fuel_correction_enabled:
+            return 0.0
+        laps = self._total_laps or self._settings.assumed_race_laps
+        if laps <= 0:
+            return 0.0
+        burn_per_lap = self._settings.race_start_fuel_kg / laps
+        return self._settings.fuel_effect_s_per_kg * burn_per_lap
 
     def observe(self, tick: TickMessage) -> DecisionMessage | None:
         """Record a tick and return a decision, or None if one is not justified yet."""
@@ -111,6 +154,7 @@ class DecisionEngine:
                 tyre_age=tick.tyre_age,
                 lap_duration_s=tick.lap_duration_s,
                 is_pit_out_lap=tick.is_pit_out_lap,
+                lap=tick.lap,
             )
         )
 
@@ -174,8 +218,14 @@ class DecisionEngine:
         if len(usable) < self._settings.min_samples_for_fit:
             return None
 
+        # Add back the time fuel burn saved, so what remains is tyre wear.
+        # Within a stint, lap number and tyre age move together, so this is a
+        # constant shift of the slope -- but it is applied per sample rather
+        # than added to the slope afterwards, so the intercept, residuals and
+        # r-squared all describe the corrected data consistently.
+        correction = self.fuel_correction_s_per_lap
         xs = [float(s.tyre_age) for s in usable]
-        ys = [s.lap_duration_s for s in usable]
+        ys = [s.lap_duration_s + correction * (s.lap - 1) for s in usable]
         n = len(xs)
 
         mean_x = sum(xs) / n
@@ -220,6 +270,7 @@ class DecisionEngine:
             slope_std_error=std_error,
             slope_ci_low=slope - margin,
             slope_ci_high=slope + margin,
+            fuel_correction_s_per_lap=correction,
         )
 
     def _decide(self, tick: TickMessage, fit: DegradationFit) -> DecisionMessage:
@@ -227,8 +278,14 @@ class DecisionEngine:
         pit_cost = self._settings.pit_lane_cost_seconds
         fresh_age = self._settings.fresh_tyre_reference_age
 
-        projected_stay = fit.predict(tick.tyre_age + 1)
-        projected_fresh = fit.predict(fresh_age)
+        # Real predicted lap times for the NEXT lap, so both carry that lap's
+        # fuel load. The fuel term is identical either way -- the same lap is
+        # run whichever tyre is on the car -- so it cancels out of `delta` and
+        # the comparison turns purely on the corrected degradation slope,
+        # which is the whole point of correcting it.
+        next_lap = tick.lap + 1
+        projected_stay = fit.predict_actual(tick.tyre_age + 1, next_lap)
+        projected_fresh = fit.predict_actual(fresh_age, next_lap)
 
         # Derived directly so it stays exact regardless of fresh_age.
         advantage = fit.slope_s_per_lap * tick.tyre_age
@@ -295,6 +352,8 @@ class DecisionEngine:
             tyre_age=tick.tyre_age,
             verdict="pit_now" if delta > 0 else "stay_out",
             current_compound_degradation_s_per_lap=round(fit.slope_s_per_lap, 4),
+            raw_degradation_s_per_lap=round(fit.raw_slope_s_per_lap, 4),
+            fuel_correction_s_per_lap=round(fit.fuel_correction_s_per_lap, 4),
             fit_intercept_s=round(fit.intercept_s, 3),
             fit_r_squared=round(fit.r_squared, 4),
             samples_used=fit.samples_used,
