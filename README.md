@@ -44,7 +44,7 @@ for exactly what has and hasn't been proven.
 cd backend
 uv sync
 uv run uvicorn backend.main:app --reload    # http://127.0.0.1:8000
-uv run pytest                               # 149 tests, no network
+uv run pytest                               # 161 tests, no network
 uv run python scripts/backtest.py           # score the engine on real races
 ```
 

@@ -24,7 +24,12 @@ import logging
 from dataclasses import dataclass, field
 
 from .config import Settings, get_settings
-from .models import DecisionMessage, DegradationSignificance, TickMessage
+from .models import (
+    DecisionMessage,
+    DegradationSignificance,
+    TickMessage,
+    VerdictBasis,
+)
 from .statistics_helpers import CONFIDENCE_LEVEL, t_critical_95
 
 logger = logging.getLogger(__name__)
@@ -294,6 +299,32 @@ class DecisionEngine:
         measurable = advantage > 0
         break_even = (pit_cost / advantage) if measurable else None
 
+        # The verdict compares stopping against staying out over the LAPS THAT
+        # REMAIN, not over the next lap alone. A one-lap comparison can only
+        # favour stopping when the tyre loses more than the whole pit cost in a
+        # single lap -- roughly 1.2 s/lap on a 19-lap-old set -- which no real
+        # tyre approaches. That made the verdict structurally incapable of ever
+        # saying "pit", which is a question nobody asks.
+        #
+        # Over the remaining laps the fresh-set advantage is collected every
+        # lap, so the comparison becomes meaningful:
+        #     net gain = advantage_per_lap * laps_remaining - pit_cost
+        laps_remaining: int | None = None
+        net_gain: float | None = None
+        basis: VerdictBasis = "next_lap_only"
+
+        if self._total_laps is not None:
+            laps_remaining = max(0, self._total_laps - tick.lap)
+            net_gain = advantage * laps_remaining - pit_cost
+            basis = "race_remaining"
+            should_pit = net_gain > 0
+        else:
+            # Race distance unknown, which in practice means live mode: OpenF1
+            # reports no lap count for a session in progress. Fall back to the
+            # one-lap comparison and say so, rather than guessing a distance
+            # and presenting the result as a recommendation.
+            should_pit = delta > 0
+
         # The same payback period at the ends of the slope's interval. A
         # shallower slope means a longer wait, so the LOW end of the slope
         # gives the HIGH end of the payback. When that end reaches zero there
@@ -309,15 +340,26 @@ class DecisionEngine:
 
         significance = fit.significance
 
-        note: str | None = None
+        # Caveats accumulate rather than overriding each other: the verdict's
+        # basis and the fit's quality are separate concerns, and a reader needs
+        # both. An earlier version let the basis note replace the degradation
+        # note, hiding the more informative of the two.
+        notes: list[str] = []
+
+        if basis == "next_lap_only":
+            notes.append(
+                "The race distance is unknown, so this verdict compares only the "
+                "next lap -- a comparison that can almost never favour stopping, "
+                "since a pit stop cannot be repaid in one lap. Read "
+                "laps_to_break_even instead, or supply the race distance."
+            )
+
         if significance == "unclear" and measurable:
-            note = (
+            notes.append(
                 f"Degradation on {fit.compound} is not distinguishable from zero: "
                 f"the slope is {fit.slope_s_per_lap:+.4f} s/lap but its 95% interval "
                 f"[{fit.slope_ci_low:+.4f}, {fit.slope_ci_high:+.4f}] spans zero, on "
-                f"{fit.samples_used} samples. The break-even figure is arithmetic on "
-                "a number the data does not yet support — treat it as provisional, "
-                "not as a recommendation."
+                f"{fit.samples_used} samples. Treat the figures as provisional."
             )
         elif not measurable:
             if fit.slope_s_per_lap <= 0:
@@ -326,31 +368,36 @@ class DecisionEngine:
                     if significance == "negative"
                     else "though the data is too noisy to be sure"
                 )
-                note = (
+                notes.append(
                     f"No measurable degradation on {fit.compound} ({confidence}): "
-                    f"fitted slope is "
-                    f"{fit.slope_s_per_lap:+.4f} s/lap. Lap times are not rising with "
-                    "tyre age. Fuel burn (~-0.03 s/lap as the car lightens) can mask "
-                    "or exceed real degradation; this engine does not correct for it. "
-                    "There is no break-even point on a tyre that is not slowing."
+                    f"fitted slope is {fit.slope_s_per_lap:+.4f} s/lap. Lap times "
+                    "are not rising with tyre age. Fuel burn (~-0.03 s/lap as the "
+                    "car lightens) can mask or exceed real degradation. There is "
+                    "no break-even point on a tyre that is not slowing."
                 )
             else:
-                note = (
-                    "Tyre age is 0, so a fresh set offers no advantage yet and there "
-                    "is no break-even point to report."
+                notes.append(
+                    "Tyre age is 0, so a fresh set offers no advantage yet and "
+                    "there is no break-even point to report."
                 )
         elif break_even is not None and break_even <= 1.0:
-            note = (
-                "Fresh tyres pay for the stop within a single lap — degradation is "
-                "extreme relative to the pit-lane cost. Check the fit before acting."
+            notes.append(
+                "Fresh tyres pay for the stop within a single lap -- degradation "
+                "is extreme relative to the pit-lane cost. Check the fit before "
+                "acting."
             )
+
+        note = " ".join(notes) if notes else None
 
         return DecisionMessage(
             lap=tick.lap,
             driver_number=tick.driver_number,
             compound=tick.compound,
             tyre_age=tick.tyre_age,
-            verdict="pit_now" if delta > 0 else "stay_out",
+            verdict="pit_now" if should_pit else "stay_out",
+            verdict_basis=basis,
+            laps_remaining=laps_remaining,
+            net_gain_s=None if net_gain is None else round(net_gain, 2),
             current_compound_degradation_s_per_lap=round(fit.slope_s_per_lap, 4),
             raw_degradation_s_per_lap=round(fit.raw_slope_s_per_lap, 4),
             fuel_correction_s_per_lap=round(fit.fuel_correction_s_per_lap, 4),
