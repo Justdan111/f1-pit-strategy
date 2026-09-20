@@ -94,8 +94,42 @@ export function DecisionPanel({
         </span>
       </div>
 
-      {/* The one-lap comparison DAY2.md specifies. */}
-      <h3>One-lap comparison</h3>
+      {/* The comparison the verdict is actually based on. */}
+      <h3>Over the rest of the race</h3>
+      <dl className="metrics">
+        <Row
+          label="laps remaining"
+          value={
+            decision.laps_remaining === null
+              ? "unknown"
+              : `${decision.laps_remaining}`
+          }
+          hint="Race distance minus the current lap. Unknown in live mode unless supplied, because OpenF1 reports no lap count for a session in progress."
+        />
+        <Row
+          label="net gain if you pit now"
+          value={
+            decision.net_gain_s === null
+              ? "—"
+              : `${sign(decision.net_gain_s)} s`
+          }
+          hint="advantage per lap x laps remaining - pit cost. Positive means stopping now saves time over the rest of the race. This is what the verdict is based on."
+        />
+      </dl>
+
+      {decision.verdict_basis === "next_lap_only" && (
+        <p className="warn">
+          <strong>Verdict not actionable.</strong> The race distance is unknown,
+          so this compares only the <em>next lap</em> — and a pit stop can never
+          be repaid in one lap, so that comparison can almost never favour
+          stopping. Read <strong>laps to break even</strong> below, or pass{" "}
+          <code>?total_laps=</code>.
+        </p>
+      )}
+
+      {/* Kept for transparency: this is the one-lap view, which is why a
+          verdict based on it alone was useless. */}
+      <h3>The next lap alone</h3>
       <dl className="metrics">
         <Row
           label="stay out (next lap)"
@@ -113,9 +147,9 @@ export function DecisionPanel({
           hint="Fixed constant. Circuit-dependent in reality; a documented simplification."
         />
         <Row
-          label="delta"
+          label="delta (one lap)"
           value={`${sign(decision.delta_s)} s`}
-          hint="Time saved by pitting over the next lap. Positive means pit_now."
+          hint="Time saved by pitting over the NEXT LAP only. Essentially always negative: a 22s stop cannot be repaid in one lap. Shown for transparency; the verdict does not use it when the race distance is known."
         />
       </dl>
 

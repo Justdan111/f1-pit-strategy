@@ -44,6 +44,12 @@ export interface DecisionMessage {
   compound: string;
   tyre_age: number;
   verdict: Verdict;
+  /** Which question the verdict answered. `next_lap_only` is not actionable. */
+  verdict_basis: "race_remaining" | "next_lap_only";
+  /** Laps left in the race. null when the distance is unknown. */
+  laps_remaining: number | null;
+  /** Seconds saved over the rest of the race by stopping now. */
+  net_gain_s: number | null;
 
   /** Tyre degradation with fuel burn removed. */
   current_compound_degradation_s_per_lap: number;

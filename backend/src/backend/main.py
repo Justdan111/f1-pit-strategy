@@ -223,6 +223,16 @@ async def stream_race(
     tick_interval: float | None = Query(
         None, description="Override seconds between ticks."
     ),
+    total_laps: int | None = Query(
+        None,
+        ge=1,
+        le=200,
+        description=(
+            "Race distance. Only needed in live mode, where OpenF1 reports no "
+            "lap count for a session in progress. Without it the verdict falls "
+            "back to a one-lap comparison and says so."
+        ),
+    ),
 ) -> None:
     """Stream one race: start -> (tick, decision)* -> end, or error.
 
@@ -297,9 +307,13 @@ async def stream_race(
         start = await source.open()
         await websocket.send_json(start.model_dump(mode="json"))
 
-        # total_laps is None in live mode, where the engine falls back to an
-        # assumed race distance.
-        engine = DecisionEngine(settings, total_laps=start.total_laps)
+        # Replay knows the distance from the data. Live mode does not, so a
+        # caller who knows the race length can supply it; the race distance is
+        # published in advance, so this is knowledge a strategist genuinely
+        # has. Without it the verdict is honest about being one-lap only.
+        engine = DecisionEngine(
+            settings, total_laps=start.total_laps or total_laps
+        )
 
         store: DecisionStore | None = websocket.app.state.store
         if store is not None:

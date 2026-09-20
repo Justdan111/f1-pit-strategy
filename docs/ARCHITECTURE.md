@@ -248,8 +248,46 @@ laps_to_break_even = pit_cost / (m · A)
 ```
 
 Not `pit_cost / m`, which would overstate the pit window by a factor of the
-tyre's age. The one-lap `verdict` reads `stay_out` almost always;
-`laps_to_break_even` is the number to act on.
+tyre's age.
+
+### What the verdict compares
+
+Over the laps that remain, not over one lap:
+
+```
+net_gain = m · A · laps_remaining − pit_cost
+verdict  = pit_now when net_gain > 0
+```
+
+The one-lap form, `m · A − pit_cost`, is still reported as `delta_s`, and is
+essentially always negative: a 22-second stop cannot be repaid in a single lap,
+so a verdict built on it was structurally incapable of ever saying `pit_now`.
+It answered a question nobody asks. The remaining-race form is the question a
+strategist actually asks, and it does change its mind — on the sample race it
+says stay out to lap 6, pit from lap 7 as the medium wears, then stay out again
+on the fresh hard after the stop.
+
+When the race distance is unknown — live mode, where OpenF1 reports no lap
+count for a session in progress — it falls back to the one-lap comparison and
+sets `verdict_basis: "next_lap_only"` rather than guessing a distance and
+presenting the result as a recommendation. `?total_laps=` supplies it.
+
+### Three things the verdict cannot see
+
+Worth knowing before comparing it to what real teams do:
+
+1. **The mandatory two-compound rule.** A dry Grand Prix requires at least two
+   different tyre compounds, so at least one stop is compulsory regardless of
+   pace. The model treats stopping as optional throughout.
+2. **Compound pace differences.** The engine compares a fresh set of the *same*
+   compound. Real strategy switches compounds, and the base-pace gap between
+   them (roughly 1–1.7 s/lap) is an order of magnitude larger than the
+   degradation effect it does model.
+3. **The tyre cliff.** Degradation is fitted as a straight line; real tyres fall
+   away sharply late in a stint, which a line under-predicts.
+
+So the model can correctly conclude "no stop pays back" in a race where the
+team stopped anyway — and be right about its own question while missing theirs.
 
 ### Stages
 

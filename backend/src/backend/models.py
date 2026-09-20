@@ -11,6 +11,14 @@ SourceKind = Literal["sample", "historical_replay", "live"]
 
 Verdict = Literal["pit_now", "stay_out"]
 
+# Which question the verdict answered.
+#   race_remaining -- does stopping now beat staying out, over the laps left?
+#                     The question a strategist actually asks.
+#   next_lap_only  -- is the NEXT LAP faster after stopping? Structurally
+#                     almost always "no", because a 22s stop cannot be repaid
+#                     in one lap. Used only when the race distance is unknown.
+VerdictBasis = Literal["race_remaining", "next_lap_only"]
+
 # Whether the fitted degradation slope is distinguishable from zero at 95%
 # confidence. "unclear" is the honest answer when the data is too noisy or too
 # sparse to tell, which is different from a tyre that genuinely is not slowing.
@@ -114,6 +122,19 @@ class DecisionMessage(BaseModel):
     tyre_age: int
 
     verdict: Verdict
+    # Which comparison produced the verdict. Clients should surface this: a
+    # next_lap_only verdict is not actionable and says so.
+    verdict_basis: VerdictBasis = "next_lap_only"
+
+    # Laps left in the race. None when the distance is unknown, which is the
+    # only reason the verdict would fall back to the one-lap comparison.
+    laps_remaining: int | None = None
+
+    # Seconds saved over the rest of the race by stopping now:
+    #     advantage_per_lap * laps_remaining - pit_lane_cost
+    # This is the number the verdict is based on. None when laps_remaining is
+    # unknown.
+    net_gain_s: float | None = None
 
     # Tyre degradation with fuel burn removed. Before fuel correction this
     # field silently meant "degradation minus fuel effect", which is why it

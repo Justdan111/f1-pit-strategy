@@ -163,6 +163,7 @@ WS /ws/race/{session_key}
 | `mode` | query | `replay` | `replay` or `live` |
 | `driver_number` | query | — | defaults to the car that ran furthest |
 | `tick_interval` | query | server default | seconds between ticks; server-clamped |
+| `total_laps` | query | from the data | race distance. Only needed in **live** mode, where OpenF1 reports no lap count for a session in progress. Without it the verdict falls back to a one-lap comparison and says so |
 
 ### Choosing a session key
 
@@ -272,6 +273,9 @@ by hand and disagreed with.
 | `type` | `"decision"` | |
 | `lap`, `driver_number`, `compound`, `tyre_age` | | which lap this is about |
 | `verdict` | `"pit_now"` \| `"stay_out"` | |
+| `verdict_basis` | `"race_remaining"` \| `"next_lap_only"` | which question was answered |
+| `laps_remaining` | int \| null | null when the race distance is unknown |
+| `net_gain_s` | float \| null | **seconds saved by stopping now, over the laps that remain.** What the verdict is based on |
 
 **The fitted curve**
 
@@ -331,10 +335,25 @@ so `delta_s > 0` means `verdict == "pit_now"`.
 }
 ```
 
-**Read `laps_to_break_even`, not `verdict`.** A one-lap comparison can only
-return `pit_now` when the tyre loses more than the entire pit cost in a single
-lap, which no real tyre approaches — so `verdict` reads `stay_out` almost
-always. The break-even figure is the number a strategist acts on.
+**`verdict` compares over the laps that remain**, using `net_gain_s`:
+
+```
+net_gain_s = fresh_tyre_advantage_s_per_lap x laps_remaining - pit_lane_cost_s
+verdict    = pit_now when net_gain_s > 0
+```
+
+`delta_s` is the same comparison over a *single* lap, kept for transparency. It
+is essentially always negative — a 22-second stop cannot be repaid in one lap —
+which is why a verdict built on it alone was structurally incapable of ever
+saying `pit_now`.
+
+**Check `verdict_basis`.** `next_lap_only` means the race distance was unknown
+and the verdict fell back to that one-lap comparison, so it is *not actionable*.
+Supply `?total_laps=` to fix it, or read `laps_to_break_even`.
+
+**Check `degradation_significance` too.** `unclear` means the slope's interval
+spans zero: the data cannot yet distinguish degradation from none, which is
+different from the tyre not degrading.
 
 **Check `degradation_significance` before trusting either.** `unclear` means
 the slope's interval spans zero: the data cannot yet distinguish degradation
