@@ -111,7 +111,16 @@ class Settings(BaseSettings):
     # Drop laps this much slower than the best lap at a similar tyre age.
     # Needed against real data: on Baku 2025, lap 1 was +25.7s (standing
     # start), laps 2-4 +55 to +89s (safety car), lap 41 +18.1s (out-lap).
-    max_lap_time_excess_for_fit_s: float = 5.0
+    #
+    # In-laps are the subtle case. Measured across all 20 cars at Baku 2025,
+    # in-laps ran +2.92s to +5.44s over the local pace, while green laps had
+    # a median of +0.31s and a p95 of +1.77s. The old 5.0s let 17 of 18
+    # in-laps into the fit, where one slow lap at the end of a stint bends
+    # the slope upwards (Leclerc lap 19: +3.67s flipped the verdict to
+    # pit_now on the lap he was already pitting). 2.5s excludes all 18 and
+    # drops 2.2% of green laps, nearly all the safety-car restart on lap 5.
+    # Margin to the gentlest in-lap is only 0.42s: re-check on other circuits.
+    max_lap_time_excess_for_fit_s: float = 2.5
 
     # Half-width in laps of the neighbourhood a lap is judged against.
     fit_outlier_window_laps: int = 3

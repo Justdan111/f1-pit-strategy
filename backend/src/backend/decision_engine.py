@@ -317,13 +317,13 @@ class DecisionEngine:
             laps_remaining = max(0, self._total_laps - tick.lap)
             net_gain = advantage * laps_remaining - pit_cost
             basis = "race_remaining"
-            should_pit = net_gain > 0
+            pays_back = net_gain > 0
         else:
             # Race distance unknown, which in practice means live mode: OpenF1
             # reports no lap count for a session in progress. Fall back to the
             # one-lap comparison and say so, rather than guessing a distance
             # and presenting the result as a recommendation.
-            should_pit = delta > 0
+            pays_back = delta > 0
 
         # The same payback period at the ends of the slope's interval. A
         # shallower slope means a longer wait, so the LOW end of the slope
@@ -340,6 +340,14 @@ class DecisionEngine:
 
         significance = fit.significance
 
+        # A stop is only recommended on degradation the data can actually
+        # show. A positive point estimate whose 95% interval reaches zero is
+        # noise that landed on the positive side: on Baku 2025 every pit_now
+        # without this gate came from exactly that, including one from three
+        # laps of data at +/-10 s/lap. Insufficient signal means stay_out.
+        should_pit = pays_back and significance == "positive"
+        suppressed = pays_back and not should_pit
+
         # Caveats accumulate rather than overriding each other: the verdict's
         # basis and the fit's quality are separate concerns, and a reader needs
         # both. An earlier version let the basis note replace the degradation
@@ -352,6 +360,13 @@ class DecisionEngine:
                 "next lap -- a comparison that can almost never favour stopping, "
                 "since a pit stop cannot be repaid in one lap. Read "
                 "laps_to_break_even instead, or supply the race distance."
+            )
+
+        if suppressed:
+            notes.append(
+                "The point estimate says a stop would pay back, but degradation "
+                "is not significantly positive, so the verdict is stay_out: "
+                "insufficient signal, not a recommendation against stopping."
             )
 
         if significance == "unclear" and measurable:

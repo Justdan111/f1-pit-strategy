@@ -214,12 +214,14 @@ def test_an_unclear_slope_says_so_in_the_note(raw_settings):
     assert "not distinguishable from zero" in decision.note
 
 
-def test_the_verdict_itself_is_unchanged_by_the_new_fields(settings):
-    """Confidence bounds inform; they must not silently move the decision."""
+def test_the_verdict_needs_both_payback_and_significance(settings):
+    """The bounds gate the verdict: pit_now only on a stop that pays back
+    AND degradation that is distinguishable from zero."""
     engine = DecisionEngine(settings)
     decision = None
     for n in range(12):
         decision = engine.observe(tick(n + 1, n, "SOFT", 90.0 + 0.1 * n))
     assert decision is not None
-    # Same one-lap rule as before: delta_s > 0 means pit.
-    assert decision.verdict == ("pit_now" if decision.delta_s > 0 else "stay_out")
+    pays_back = decision.delta_s > 0
+    significant = decision.degradation_significance == "positive"
+    assert decision.verdict == ("pit_now" if pays_back and significant else "stay_out")

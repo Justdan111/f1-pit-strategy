@@ -53,7 +53,8 @@ def test_net_gain_is_advantage_times_laps_remaining_minus_pit_cost(raw_settings)
 def test_the_verdict_follows_the_net_gain(raw_settings):
     d = run(raw_settings, total_laps=60)
     assert d is not None
-    assert d.verdict == ("pit_now" if d.net_gain_s > 0 else "stay_out")
+    significant = d.degradation_significance == "positive"
+    assert d.verdict == ("pit_now" if d.net_gain_s > 0 and significant else "stay_out")
 
 
 def test_a_worn_tyre_with_a_long_race_left_says_pit(raw_settings):
@@ -109,7 +110,8 @@ def test_without_a_race_distance_it_falls_back_and_says_so(raw_settings):
 def test_the_fallback_matches_the_old_one_lap_rule(raw_settings):
     d = run(raw_settings, total_laps=None, slope=0.10, laps=20)
     assert d is not None
-    assert d.verdict == ("pit_now" if d.delta_s > 0 else "stay_out")
+    significant = d.degradation_significance == "positive"
+    assert d.verdict == ("pit_now" if d.delta_s > 0 and significant else "stay_out")
 
 
 def test_a_supplied_distance_restores_an_actionable_verdict(raw_settings):
