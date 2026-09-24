@@ -29,6 +29,25 @@ same pipeline.
 > `REPLAY` badge. Live mode shows `LIVE`, and only once the server confirms a
 > session is actually running.
 
+## Reading the verdict
+
+**Expect `stay_out` on almost every lap at a low-degradation circuit. That is
+the engine working, not the engine idling.** It recommends `pit_now` only when
+two things are true: a fresh set repays the ~22s pit loss over the laps left,
+*and* the tyre's degradation is statistically distinguishable from zero (the
+95% interval on the slope sits entirely above zero). When the data cannot show
+wear, the answer is `stay_out` — insufficient signal, not advice against
+stopping — and the decision's `note` says so.
+
+This was validated by replaying all 20 cars of the 2025 Azerbaijan GP
+(`9904`): 782 decisions, 779 `stay_out`. Tyre wear at Baku measured 0.01–0.06
+s/lap after fuel correction, too little to repay a stop on wear alone.
+
+Every car still stopped once in that race because the rules require two dry
+compounds. **The engine does not model that rule**: it compares the current
+tyre against a fresh set of the *same* compound, so it cannot say when to take
+a compulsory stop. Read its verdict as "is degradation alone worth a stop?"
+
 ## Status
 
 Live mode is built and unit-tested but **has not yet run against a live

@@ -317,7 +317,8 @@ by hand and disagreed with.
 | `delta_s` | float | **time saved by pitting**, over the next lap |
 
 Sign convention: `delta_s = projected_current − (projected_fresh + pit_cost)`,
-so `delta_s > 0` means `verdict == "pit_now"`.
+so `delta_s > 0` means pitting wins the next lap (the `next_lap_only` verdict
+still also requires significant degradation, below).
 
 **What the call actually turns on**
 
@@ -356,7 +357,13 @@ so `delta_s > 0` means `verdict == "pit_now"`.
 ```
 net_gain_s = fresh_tyre_advantage_s_per_lap x laps_remaining - pit_lane_cost_s
 verdict    = pit_now when net_gain_s > 0
+                      and degradation_significance == "positive"
 ```
+
+A positive `net_gain_s` on degradation whose 95% interval reaches zero is noise
+that landed on the positive side, so it gives `stay_out` with a `note` saying
+the signal is insufficient. Every `pit_now` in a replay of Baku 2025 without
+this rule came from exactly that case.
 
 `delta_s` is the same comparison over a *single* lap, kept for transparency. It
 is essentially always negative — a 22-second stop cannot be repaid in one lap —
@@ -500,7 +507,7 @@ prefix. Nothing is baked into the container image.
 | `F1_PIT_LANE_COST_SECONDS` | `22.0` | circuit-dependent in reality |
 | `F1_MIN_SAMPLES_FOR_FIT` | `3` | two points always fit a line perfectly |
 | `F1_FRESH_TYRE_REFERENCE_AGE` | `1.0` | lap one on a new set is not its best |
-| `F1_MAX_LAP_TIME_EXCESS_FOR_FIT_S` | `5.0` | outlier threshold |
+| `F1_MAX_LAP_TIME_EXCESS_FOR_FIT_S` | `2.5` | outlier threshold; catches in-laps (see SPEC §14.3) |
 | `F1_FIT_OUTLIER_WINDOW_LAPS` | `3` | neighbourhood a lap is judged against |
 | `F1_EXCLUDE_PIT_OUT_LAPS_FROM_FIT` | `true` | |
 

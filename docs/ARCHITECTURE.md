@@ -256,7 +256,7 @@ Over the laps that remain, not over one lap:
 
 ```
 net_gain = m · A · laps_remaining − pit_cost
-verdict  = pit_now when net_gain > 0
+verdict  = pit_now when net_gain > 0 and the slope's 95% interval is above zero
 ```
 
 The one-lap form, `m · A − pit_cost`, is still reported as `delta_s`, and is
