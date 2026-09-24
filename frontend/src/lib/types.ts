@@ -16,6 +16,18 @@ export type DegradationSignificance = "positive" | "unclear" | "negative";
 
 export type Mode = "replay" | "live";
 
+/** One entrant, from GET /race/{session_key}/drivers (OpenF1 /v1/drivers).
+ *  Team is metadata on the driver: there is no team-level stream. */
+export interface Driver {
+  driver_number: number;
+  full_name: string | null;
+  last_name: string | null;
+  name_acronym: string | null;
+  team_name: string | null;
+  /** Hex without the leading '#'. */
+  team_colour: string | null;
+}
+
 export interface StartMessage {
   type: "start";
   session_key: string;

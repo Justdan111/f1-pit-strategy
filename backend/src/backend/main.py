@@ -1,6 +1,7 @@
 """FastAPI application: health, a debug REST route, and the WebSocket stream."""
 
 import logging
+import time
 from contextlib import asynccontextmanager
 
 import httpx
@@ -14,6 +15,7 @@ from .decision_engine import DecisionEngine
 from .live import LATEST_SESSION_KEY, LiveTickSource, NoLiveSessionError
 from .models import (
     DecisionMessage,
+    Driver,
     EndMessage,
     ErrorMessage,
     NoLiveSessionMessage,
@@ -22,7 +24,7 @@ from .models import (
 )
 from .openf1_client import OpenF1Client, OpenF1Error
 from .replay import ReplayTickSource
-from .sample_data import SAMPLE_SESSION_KEY, sample_stints
+from .sample_data import SAMPLE_DRIVER_NUMBER, SAMPLE_SESSION_KEY, sample_stints
 from .storage import DecisionStore
 from .tick_source import TickSource, TickSourceError
 
@@ -51,6 +53,7 @@ async def lifespan(app: FastAPI):
         app.state.http = http
         app.state.openf1 = OpenF1Client(http, settings)
         app.state.store = store
+        app.state.drivers_cache = {}
         logger.info("Startup complete. OpenF1 base URL: %s", settings.openf1_base_url)
         yield
 
@@ -134,6 +137,46 @@ async def get_sample_stints() -> list[Stint]:
     return sample_stints()
 
 
+# Entry lists change at most between sessions, so a short cache costs nothing
+# in accuracy and stops an open REST route from eating into the one rate
+# limit that live polling also depends on.
+DRIVERS_CACHE_SECONDS = 300.0
+
+
+@app.get("/race/{session_key}/drivers")
+async def get_drivers(session_key: str) -> list[Driver]:
+    """Who is entered in a session, for choosing which car to stream.
+
+    `latest` resolves to the most recent session, as it does for live mode.
+    """
+    if session_key == SAMPLE_SESSION_KEY:
+        return [
+            Driver(
+                driver_number=SAMPLE_DRIVER_NUMBER,
+                full_name="Sample Driver",
+                last_name="Sample",
+                name_acronym="SMP",
+                team_name="Offline fixture",
+            )
+        ]
+
+    cache: dict[str, tuple[float, list[Driver]]] = app.state.drivers_cache
+    cached = cache.get(session_key)
+    if cached is not None and time.monotonic() - cached[0] < DRIVERS_CACHE_SECONDS:
+        return cached[1]
+
+    try:
+        drivers = await app.state.openf1.get_drivers(session_key)
+    except OpenF1Error as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    drivers = sorted(drivers, key=lambda d: d.driver_number)
+    # An empty list is not cached: early in a live session it fills in later.
+    if drivers:
+        cache[session_key] = (time.monotonic(), drivers)
+    return drivers
+
+
 @app.get("/runs")
 async def list_runs(limit: int = Query(50, ge=1, le=200)) -> dict[str, object]:
     """Recent recorded streams, newest first."""
@@ -167,6 +210,16 @@ def _build_source(
     """Choose a TickSource for this connection. The only mode-aware code here."""
     settings: Settings = app.state.settings
 
+    if driver_number is None:
+        # Never defaulted: a stream is always one named car, so the client
+        # must say which. GET /race/{session_key}/drivers lists the choices.
+        raise TickSourceError(
+            "driver_number is required: a stream follows exactly one car. "
+            f"Add ?driver_number=<n>; GET /race/{session_key}/drivers lists "
+            "the drivers entered in this session.",
+            code="driver_number_required",
+        )
+
     if mode == "live":
         if session_key == SAMPLE_SESSION_KEY:
             raise TickSourceError(
@@ -189,6 +242,7 @@ def _build_source(
 
     if session_key == SAMPLE_SESSION_KEY:
         return ReplayTickSource.from_sample(
+            driver_number=driver_number,
             tick_interval_seconds=tick_interval_seconds,
             settings=settings,
         )
@@ -217,8 +271,10 @@ async def stream_race(
     websocket: WebSocket,
     session_key: str,
     mode: str = Query("replay", description="'replay' or 'live'."),
+    # Required, but declared optional so that a missing value is refused
+    # in-protocol with an explanation rather than as an opaque 1008 close.
     driver_number: int | None = Query(
-        None, description="Defaults to the car that ran furthest."
+        None, description="Required. The one car this stream follows."
     ),
     tick_interval: float | None = Query(
         None, description="Override seconds between ticks."

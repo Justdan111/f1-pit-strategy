@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useReducer } from "react";
 import {
   DecisionMessage,
+  Driver,
   Mode,
   NoLiveSessionMessage,
   StartMessage,
@@ -276,16 +277,52 @@ export function authSubprotocols(): string[] {
 export function buildStreamUrl(
   sessionKey: string,
   mode: Mode,
+  driverNumber: number,
   backend?: string,
 ): string {
   const base = (backend ?? resolveBackendOrigin()).replace(/\/$/, "");
-  return `${base}/ws/race/${encodeURIComponent(sessionKey)}?mode=${mode}`;
+  const params = new URLSearchParams({
+    mode,
+    driver_number: String(driverNumber),
+  });
+  return `${base}/ws/race/${encodeURIComponent(sessionKey)}?${params}`;
+}
+
+/** The backend's HTTP origin: the WebSocket origin with its scheme swapped back. */
+export function resolveBackendHttpOrigin(): string {
+  return resolveBackendOrigin()
+    .replace(/^wss:\/\//, "https://")
+    .replace(/^ws:\/\//, "http://");
+}
+
+/** Who is entered in a session, for the driver picker. */
+export async function fetchDrivers(
+  sessionKey: string,
+  signal?: AbortSignal,
+): Promise<Driver[]> {
+  const url = `${resolveBackendHttpOrigin()}/race/${encodeURIComponent(sessionKey)}/drivers`;
+  const response = await fetch(url, { signal });
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try {
+      const body = await response.json();
+      if (typeof body?.detail === "string") detail = body.detail;
+    } catch {
+      // Not JSON; the status line is the best explanation available.
+    }
+    throw new Error(`Could not load drivers for ${sessionKey}: ${detail}`);
+  }
+  return (await response.json()) as Driver[];
 }
 
 export function useRaceStream() {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const socketRef = useRef<WebSocket | null>(null);
-  const targetRef = useRef<{ sessionKey: string; mode: Mode } | null>(null);
+  const targetRef = useRef<{
+    sessionKey: string;
+    mode: Mode;
+    driverNumber: number;
+  } | null>(null);
   const attemptRef = useRef(0);
   const timerRef = useRef<number | null>(null);
   const shouldReconnectRef = useRef(false);
@@ -319,13 +356,13 @@ export function useRaceStream() {
   }, [teardown]);
 
   /** Shared by the first connection and every reconnect, so both are the same path. */
-  const openSocket = useCallback((sessionKey: string, mode: Mode) => {
+  const openSocket = useCallback((sessionKey: string, mode: Mode, driverNumber: number) => {
     let socket: WebSocket;
     try {
       const protocols = authSubprotocols();
       socket = protocols.length
-        ? new WebSocket(buildStreamUrl(sessionKey, mode), protocols)
-        : new WebSocket(buildStreamUrl(sessionKey, mode));
+        ? new WebSocket(buildStreamUrl(sessionKey, mode, driverNumber), protocols)
+        : new WebSocket(buildStreamUrl(sessionKey, mode, driverNumber));
     } catch (cause) {
       dispatch({
         kind: "transport_error",
@@ -414,7 +451,7 @@ export function useRaceStream() {
 
     timerRef.current = window.setTimeout(() => {
       dispatch({ kind: "reconnect_attempt" });
-      openSocket(target.sessionKey, target.mode);
+      openSocket(target.sessionKey, target.mode, target.driverNumber);
     }, delay);
   }, [openSocket]);
 
@@ -423,12 +460,12 @@ export function useRaceStream() {
   }, [scheduleReconnect]);
 
   const connect = useCallback(
-    (sessionKey: string, mode: Mode) => {
+    (sessionKey: string, mode: Mode, driverNumber: number) => {
       teardown();
-      targetRef.current = { sessionKey, mode };
+      targetRef.current = { sessionKey, mode, driverNumber };
       attemptRef.current = 0;
       dispatch({ kind: "connect_requested" });
-      openSocket(sessionKey, mode);
+      openSocket(sessionKey, mode, driverNumber);
     },
     [teardown, openSocket],
   );

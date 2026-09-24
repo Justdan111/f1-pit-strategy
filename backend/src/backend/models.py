@@ -61,6 +61,24 @@ class Lap(BaseModel):
     meeting_key: int | None = None
 
 
+class Driver(BaseModel):
+    """One entrant in a session. Field names match OpenF1 /v1/drivers.
+
+    Team is metadata on the driver, not a separate concept: there is no
+    team-level stream, only cars.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    driver_number: int
+    full_name: str | None = None
+    last_name: str | None = None
+    name_acronym: str | None = None
+    team_name: str | None = None
+    # Hex without the leading '#', as OpenF1 sends it.
+    team_colour: str | None = None
+
+
 class Session(BaseModel):
     """One session from OpenF1 /v1/sessions. Timestamps are timezone-aware."""
 

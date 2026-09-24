@@ -14,7 +14,7 @@ from .sample_data import (
     sample_laps,
     sample_stints,
 )
-from .tick_builder import flatten_to_ticks, resolve_driver
+from .tick_builder import ensure_driver_entered, fetch_driver_race, flatten_to_ticks
 from .tick_source import NoDataError, TickSource
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RaceData:
-    """Stints say which tyre was on the car; laps say how fast it went."""
+    """One car's race. Stints say which tyre was on it; laps say how fast it went."""
 
     stints: list[Stint]
     laps: list[Lap] = field(default_factory=list)
@@ -38,7 +38,9 @@ class ReplayTickSource(TickSource):
     Its purpose is to make the transport behave the way live mode will.
 
     Data arrives through an injected loader, so the same class serves the
-    offline fixture and a real historical race with no mode branch.
+    offline fixture and a real historical race with no mode branch. The
+    loader returns one car's data only; the driver is always named, never
+    picked.
     """
 
     def __init__(
@@ -47,7 +49,7 @@ class ReplayTickSource(TickSource):
         session_key: str,
         loader: RaceDataLoader,
         source: SourceKind,
-        driver_number: int | None = None,
+        driver_number: int,
         tick_interval_seconds: float | None = None,
         settings: Settings | None = None,
     ) -> None:
@@ -56,7 +58,7 @@ class ReplayTickSource(TickSource):
         self._session_key = session_key
         self._loader = loader
         self._source: SourceKind = source
-        self._requested_driver = driver_number
+        self._driver_number = driver_number
         self._tick_interval = (
             settings.replay_tick_interval_seconds
             if tick_interval_seconds is None
@@ -64,26 +66,32 @@ class ReplayTickSource(TickSource):
         )
 
         self._ticks: list[TickMessage] = []
-        self._driver_number: int | None = None
         self._opened = False
 
     @classmethod
     def from_sample(
         cls,
         *,
+        driver_number: int = SAMPLE_DRIVER_NUMBER,
         tick_interval_seconds: float | None = None,
         settings: Settings | None = None,
     ) -> "ReplayTickSource":
-        """Replay the offline fixture. No network involved."""
+        """Replay the offline fixture. No network involved. It has one car."""
 
         async def loader() -> RaceData:
+            if driver_number != SAMPLE_DRIVER_NUMBER:
+                raise NoDataError(
+                    f"Driver {driver_number} is not entered in session "
+                    f"{SAMPLE_SESSION_KEY!r}. Drivers entered: [{SAMPLE_DRIVER_NUMBER}]",
+                    code="unknown_driver",
+                )
             return RaceData(stints=sample_stints(), laps=sample_laps())
 
         return cls(
             session_key=SAMPLE_SESSION_KEY,
             loader=loader,
             source="sample",
-            driver_number=SAMPLE_DRIVER_NUMBER,
+            driver_number=driver_number,
             tick_interval_seconds=tick_interval_seconds,
             settings=settings,
         )
@@ -94,17 +102,15 @@ class ReplayTickSource(TickSource):
         *,
         client: OpenF1Client,
         session_key: str,
-        driver_number: int | None = None,
+        driver_number: int,
         tick_interval_seconds: float | None = None,
         settings: Settings | None = None,
     ) -> "ReplayTickSource":
-        """Replay a finished race fetched from OpenF1."""
+        """Replay one car's finished race fetched from OpenF1."""
 
         async def loader() -> RaceData:
-            # Stints are not filtered by driver at the API, so resolve_driver
-            # can see the full grid and name who is actually present.
-            stints = await client.get_stints(session_key)
-            laps = await client.get_laps(session_key, driver_number)
+            await ensure_driver_entered(client, session_key, driver_number)
+            stints, laps = await fetch_driver_race(client, session_key, driver_number)
             return RaceData(stints=stints, laps=laps)
 
         return cls(
@@ -127,28 +133,23 @@ class ReplayTickSource(TickSource):
     async def open(self) -> StartMessage:
         """Load, flatten, and describe the stream. All fallible work happens here."""
         race = await self._loader()
-        stints = race.stints
+        driver_number = self._driver_number
 
-        if not stints:
+        if not race.stints:
             raise NoDataError(
-                f"OpenF1 returned no stint data for session_key={self._session_key!r}. "
-                "Check the session_key is correct and that the session has run."
+                f"OpenF1 returned no stint data for driver {driver_number} in "
+                f"session_key={self._session_key!r}. Check the session has run "
+                "and that this car took part in it."
             )
 
-        driver_number = resolve_driver(
-            stints, self._requested_driver, self._session_key
-        )
-        driver_stints = [s for s in stints if s.driver_number == driver_number]
-        driver_laps = [lap for lap in race.laps if lap.driver_number == driver_number]
-
-        self._ticks = flatten_to_ticks(driver_stints, driver_laps)
+        # Raises if the loader let another car's rows through.
+        self._ticks = flatten_to_ticks(race.stints, race.laps)
         if not self._ticks:
             raise NoDataError(
                 f"Stint data for driver {driver_number} in session "
                 f"{self._session_key!r} contained no usable laps."
             )
 
-        self._driver_number = driver_number
         self._opened = True
 
         timed = sum(1 for t in self._ticks if t.lap_duration_s is not None)
