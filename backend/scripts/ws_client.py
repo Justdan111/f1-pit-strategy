@@ -105,7 +105,7 @@ def main() -> int:
     )
     parser.add_argument("--session-key", default="sample")
     parser.add_argument("--mode", default="replay", choices=["replay", "live"])
-    parser.add_argument("--driver-number", type=int, default=None)
+    parser.add_argument("--driver-number", type=int, required=True)
     parser.add_argument(
         "--raw", action="store_true", help="Print decision messages as raw JSON."
     )

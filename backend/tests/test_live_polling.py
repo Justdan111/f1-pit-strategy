@@ -10,7 +10,9 @@ from datetime import timedelta
 import pytest
 
 from backend.live import LiveTickSource
-from backend.models import Lap, Stint
+from backend.models import Driver, Lap, Stint
+from backend.tick_builder import MixedDriverDataError
+from backend.tick_source import NoDataError
 
 from .conftest import FakeOpenF1Client
 
@@ -204,26 +206,102 @@ async def test_stream_ends_when_the_live_window_closes(settings, baku_2025_race)
     assert len(ticks) > 10
 
 
-async def test_driver_is_resolved_once_and_does_not_switch(
-    settings, baku_2025_race
-):
-    """Re-resolving each poll could follow a different car mid-race."""
-    two_cars = [
-        Stint(driver_number=1, stint_number=1, lap_start=1, lap_end=3,
-              compound="HARD", tyre_age_at_start=0),
+async def test_polls_ask_the_api_for_one_driver_only(settings, baku_2025_race):
+    """Filtering at the API, not after: the grid never reaches the flattener."""
+    source, client, _ = build(
+        baku_2025_race, [([stint(3)], [lap(n, 95.0) for n in range(1, 4)])], settings
+    )
+    await source.open()
+    [t async for t in source.ticks()]
+
+    data_calls = [c for c in client.calls if c[0] in ("get_stints", "get_laps")]
+    assert data_calls
+    assert all(args[1] == 1 for _, args, _ in data_calls)
+
+
+async def test_car_still_in_the_garage_is_not_an_error(settings, baku_2025_race):
+    """Practice: other cars are running, ours has no stint yet. Keep polling."""
+    grid = [
         Stint(driver_number=44, stint_number=1, lap_start=1, lap_end=9,
               compound="SOFT", tyre_age_at_start=0),
     ]
-    schedule = [(two_cars, [lap(n, 95.0) for n in range(1, 10)])] * 3
+    later = grid + [
+        Stint(driver_number=16, stint_number=1, lap_start=1, lap_end=3,
+              compound="MEDIUM", tyre_age_at_start=2),
+    ]
+    laps_44 = [Lap(driver_number=44, lap_number=n, lap_duration=94.0) for n in range(1, 10)]
+    laps_16 = [Lap(driver_number=16, lap_number=n, lap_duration=96.0) for n in range(1, 4)]
+
+    class GarageClient(FakeOpenF1Client):
+        polls = 0
+
+        async def get_stints(self, session_key, driver_number=None):
+            self.calls.append(("get_stints", (session_key, driver_number), {}))
+            self.polls += 1
+            rows = grid if self.polls <= 2 else later
+            return [s for s in rows if s.driver_number == driver_number]
+
+        async def get_laps(self, session_key, driver_number=None):
+            self.calls.append(("get_laps", (session_key, driver_number), {}))
+            rows = laps_44 + (laps_16 if self.polls > 2 else [])
+            return [r for r in rows if r.driver_number == driver_number]
+
     clock = Clock(baku_2025_race.date_start + timedelta(minutes=5))
-    client = GrowingClient([baku_2025_race], schedule)
-    # No driver requested: it should pick #44 (most laps) and stay there.
+    client = GarageClient(
+        sessions=[baku_2025_race],
+        drivers=[Driver(driver_number=16), Driver(driver_number=44)],
+    )
     source = LiveTickSource(
-        client=client, session_key="9904", driver_number=None, settings=settings,
+        client=client, session_key="9904", driver_number=16, settings=settings,
         clock=clock.now, sleep=clock.sleep,
     )
     await source.open()
     ticks = [t async for t in source.ticks()]
 
-    assert ticks
-    assert {t.driver_number for t in ticks} == {44}
+    assert [t.lap for t in ticks] == [1, 2, 3]
+    assert {t.driver_number for t in ticks} == {16}
+    assert [t.tyre_age for t in ticks] == [2, 3, 4]
+
+
+async def test_open_refuses_a_driver_not_entered(settings, baku_2025_race):
+    client = FakeOpenF1Client(
+        sessions=[baku_2025_race],
+        drivers=[Driver(driver_number=1), Driver(driver_number=16)],
+    )
+    clock = Clock(baku_2025_race.date_start + timedelta(minutes=5))
+    source = LiveTickSource(
+        client=client, session_key="9904", driver_number=99, settings=settings,
+        clock=clock.now, sleep=clock.sleep,
+    )
+    with pytest.raises(NoDataError) as caught:
+        await source.open()
+    assert caught.value.code == "unknown_driver"
+    assert "[1, 16]" in caught.value.detail
+
+
+async def test_a_leak_from_another_car_fails_loudly(settings, baku_2025_race):
+    """If the API ever ignored the filter, the stream must stop, not blend cars."""
+
+    class LeakyClient(FakeOpenF1Client):
+        async def get_stints(self, session_key, driver_number=None):
+            self.calls.append(("get_stints", (session_key, driver_number), {}))
+            return list(self.stints)  # ignores driver_number
+
+    client = LeakyClient(
+        sessions=[baku_2025_race],
+        stints=[
+            Stint(driver_number=1, stint_number=1, lap_start=1, lap_end=3,
+                  compound="HARD", tyre_age_at_start=0),
+            Stint(driver_number=44, stint_number=1, lap_start=1, lap_end=9,
+                  compound="SOFT", tyre_age_at_start=0),
+        ],
+        laps=[lap(n, 95.0) for n in range(1, 4)],
+    )
+    clock = Clock(baku_2025_race.date_start + timedelta(minutes=5))
+    source = LiveTickSource(
+        client=client, session_key="9904", driver_number=1, settings=settings,
+        clock=clock.now, sleep=clock.sleep,
+    )
+    await source.open()
+    with pytest.raises(MixedDriverDataError):
+        [t async for t in source.ticks()]

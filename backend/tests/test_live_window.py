@@ -129,6 +129,7 @@ async def test_open_reports_no_live_session_with_the_next_one(
     source = LiveTickSource(
         client=client,
         session_key=LATEST_SESSION_KEY,
+        driver_number=1,
         settings=settings,
         clock=lambda: utc("2026-09-14T12:00:00+00:00"),
     )
@@ -165,7 +166,7 @@ async def test_open_succeeds_inside_a_real_window(settings, baku_2025_race):
 async def test_open_when_openf1_knows_no_such_session(settings):
     client = FakeOpenF1Client(sessions=[])
     source = LiveTickSource(
-        client=client, session_key="does-not-exist", settings=settings,
+        client=client, session_key="does-not-exist", driver_number=1, settings=settings,
         clock=lambda: utc("2026-09-14T12:00:00+00:00"),
     )
     with pytest.raises(NoLiveSessionError, match="no session"):
@@ -185,7 +186,8 @@ async def test_next_session_lookup_failure_still_answers(settings, baku_2025_rac
 
     client = FlakyLookup(sessions=[baku_2025_race])
     source = LiveTickSource(
-        client=client, session_key=LATEST_SESSION_KEY, settings=settings,
+        client=client, session_key=LATEST_SESSION_KEY, driver_number=1,
+        settings=settings,
         clock=lambda: utc("2026-09-14T12:00:00+00:00"),
     )
     with pytest.raises(NoLiveSessionError) as caught:

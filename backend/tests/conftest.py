@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import pytest
 
 from backend.config import Settings
-from backend.models import Lap, Session, Stint
+from backend.models import Driver, Lap, Session, Stint
 
 
 @pytest.fixture
@@ -106,10 +106,13 @@ class FakeOpenF1Client:
         sessions: list[Session] | None = None,
         stints: list[Stint] | None = None,
         laps: list[Lap] | None = None,
+        drivers: list[Driver] | None = None,
     ) -> None:
         self.sessions = sessions or []
         self.stints = stints or []
         self.laps = laps or []
+        # Unset, the entry list is every car that appears in the stints.
+        self.drivers = drivers
         self.calls: list[tuple[str, tuple, dict]] = []
         # Set to an exception to make the next N calls fail.
         self.fail_with: Exception | None = None
@@ -128,12 +131,27 @@ class FakeOpenF1Client:
     async def get_stints(self, session_key, driver_number=None):
         self.calls.append(("get_stints", (session_key, driver_number), {}))
         self._maybe_fail()
-        return list(self.stints)
+        return only_driver(self.stints, driver_number)
 
     async def get_laps(self, session_key, driver_number=None):
         self.calls.append(("get_laps", (session_key, driver_number), {}))
         self._maybe_fail()
-        return list(self.laps)
+        return only_driver(self.laps, driver_number)
+
+    async def get_drivers(self, session_key):
+        self.calls.append(("get_drivers", (session_key,), {}))
+        self._maybe_fail()
+        if self.drivers is not None:
+            return list(self.drivers)
+        numbers = sorted({s.driver_number for s in self.stints})
+        return [Driver(driver_number=n) for n in numbers]
+
+
+def only_driver(rows, driver_number):
+    """Filter as OpenF1 does when driver_number is passed as a query param."""
+    if driver_number is None:
+        return list(rows)
+    return [r for r in rows if r.driver_number == driver_number]
 
 
 @pytest.fixture

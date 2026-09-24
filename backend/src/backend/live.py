@@ -6,9 +6,9 @@ from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Awaitable, Callable
 
 from .config import Settings, get_settings
-from .models import Lap, Session, StartMessage, Stint, TickMessage
+from .models import Session, StartMessage, TickMessage
 from .openf1_client import OpenF1Client, OpenF1Error, OpenF1RateLimited
-from .tick_builder import flatten_to_ticks, resolve_driver
+from .tick_builder import ensure_driver_entered, fetch_driver_race, flatten_to_ticks
 from .tick_source import TickSource, TickSourceError
 
 logger = logging.getLogger(__name__)
@@ -82,15 +82,16 @@ class LiveTickSource(TickSource):
         self,
         *,
         client: OpenF1Client,
+        driver_number: int,
         session_key: str = LATEST_SESSION_KEY,
-        driver_number: int | None = None,
         settings: Settings | None = None,
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._client = client
         self._requested_session_key = session_key
-        self._requested_driver = driver_number
+        # Fixed at construction, so the stream cannot switch cars.
+        self._driver_number = driver_number
         self._settings = settings or get_settings()
 
         # Injected so tests can control time.
@@ -98,7 +99,6 @@ class LiveTickSource(TickSource):
         self._sleep: Callable[[float], Awaitable[None]] = sleep or asyncio.sleep
 
         self._session: Session | None = None
-        self._driver_number: int | None = None
         # Per connection, so a reconnect replays the race so far.
         self._emitted_laps: set[int] = set()
         self._opened = False
@@ -121,14 +121,19 @@ class LiveTickSource(TickSource):
         if not is_session_live(session, now, self._settings.live_window_margin_minutes):
             raise await self._no_live_session(session, now)
 
+        await ensure_driver_entered(
+            self._client, str(session.session_key), self._driver_number
+        )
+
         self._session = session
         self._opened = True
         opens, closes = live_window(session, self._settings.live_window_margin_minutes)
         logger.info(
-            "Live session detected: %s (session_key=%s), window %s to %s, "
-            "polling every %.1fs",
+            "Live session detected: %s (session_key=%s), following driver %s, "
+            "window %s to %s, polling every %.1fs",
             session.label,
             session.session_key,
+            self._driver_number,
             opens.isoformat(),
             closes.isoformat(),
             self._settings.live_poll_interval_seconds,
@@ -139,7 +144,7 @@ class LiveTickSource(TickSource):
             source="live",
             # Always None: a race in progress has no known total.
             total_laps=None,
-            driver_number=self._requested_driver,
+            driver_number=self._driver_number,
         )
 
     async def ticks(self) -> AsyncIterator[TickMessage]:
@@ -266,22 +271,16 @@ class LiveTickSource(TickSource):
         """One poll: fetch, merge, and return only laps not already emitted."""
         session_key = str(self._session.session_key)  # type: ignore[union-attr]
 
-        stints: list[Stint] = await self._client.get_stints(session_key)
+        stints, laps = await fetch_driver_race(
+            self._client, session_key, self._driver_number
+        )
         if not stints:
-            # Normal early on: the session is live but no lap is complete.
+            # Normal early on, and for a car still in the garage while others
+            # run: that car simply has no stint yet.
             return []
 
-        if self._driver_number is None:
-            # Resolved once and then fixed, so the stream cannot switch cars.
-            self._driver_number = resolve_driver(
-                stints, self._requested_driver, session_key
-            )
-            logger.info("Live stream following driver %s", self._driver_number)
-
-        laps: list[Lap] = await self._client.get_laps(session_key, self._driver_number)
-
-        driver_stints = [s for s in stints if s.driver_number == self._driver_number]
-        all_ticks = flatten_to_ticks(driver_stints, laps)
+        # Raises if the API let another car's rows through.
+        all_ticks = flatten_to_ticks(stints, laps)
         return self._select_new(all_ticks)
 
     def _select_new(self, ticks: list[TickMessage]) -> list[TickMessage]:

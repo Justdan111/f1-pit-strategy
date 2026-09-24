@@ -9,7 +9,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from .config import Settings
-from .models import Lap, Session, Stint
+from .models import Driver, Lap, Session, Stint
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,10 @@ class OpenF1Client:
         driver_number: int | None = None,
     ) -> list[Stint]:
         """Fetch stints. Unparseable rows are dropped, not fatal: one retirement
-        must not make the other nineteen drivers unusable."""
+        must not make the other nineteen drivers unusable.
+
+        `driver_number=None` returns the whole grid. Streaming code must never
+        pass None: see `tick_builder.fetch_driver_race`."""
         rows = await self._get(
             "stints",
             {"session_key": session_key, "driver_number": driver_number},
@@ -185,6 +188,11 @@ class OpenF1Client:
             {"session_key": session_key, "driver_number": driver_number},
         )
         return self._parse(rows, Lap, "lap", session_key)
+
+    async def get_drivers(self, session_key: str) -> list[Driver]:
+        """Who is entered in a session: number, name, team, team colour."""
+        rows = await self._get("drivers", {"session_key": session_key})
+        return self._parse(rows, Driver, "driver", session_key)
 
     async def get_sessions(
         self,

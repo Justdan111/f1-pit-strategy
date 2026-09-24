@@ -80,7 +80,17 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .connect button[type="submit"] { background: var(--ended); border-color: var(--ended); }
 .connect button:disabled { opacity: 0.4; cursor: not-allowed; }
 .connect select option:disabled { color: var(--muted); font-style: italic; }
+.connect label span.driver-pick {
+  display: flex; align-items: center; gap: 8px;
+  text-transform: none; letter-spacing: normal; font-size: inherit;
+}
+.connect .driver-pick select { min-width: 320px; }
+.connect label span.team-swatch {
+  width: 6px; height: 34px; border-radius: 3px; flex-shrink: 0;
+  border: 1px solid var(--line);
+}
 .hint { flex-basis: 100%; margin: 0; font-size: 13px; color: var(--muted); }
+.hint-error { color: var(--error); }
 
 /* --- status banner: one distinct colour per state --- */
 .banner {

@@ -79,6 +79,19 @@ that will not connect. Keys themselves are never echoed.
 
 Also the endpoint to hit to wake a sleeping free-tier service before a session.
 
+### `GET /race/{session_key}/drivers`
+
+Who is entered in a session, for choosing a car to stream. Proxies OpenF1
+`/v1/drivers` through the shared rate limiter, cached for five minutes.
+`latest` works; `sample` returns the fixture's one car. `502` if OpenF1 fails.
+
+```json
+[{"driver_number": 16, "full_name": "Charles LECLERC", "last_name": "Leclerc",
+  "name_acronym": "LEC", "team_name": "Ferrari", "team_colour": "ED1131"}]
+```
+
+Team is metadata on the driver. There is no team-level stream.
+
 ### `GET /race/sample/stints`
 
 **Debug only, not the product surface.** The raw stints of the offline fixture,
@@ -161,7 +174,7 @@ WS /ws/race/{session_key}
 |---|---|---|---|
 | `session_key` | path | — | `sample`, `latest`, or a numeric OpenF1 key |
 | `mode` | query | `replay` | `replay` or `live` |
-| `driver_number` | query | — | defaults to the car that ran furthest |
+| `driver_number` | query | **required** | the one car this stream follows. Missing → `driver_number_required`. List choices with `GET /race/{session_key}/drivers` |
 | `tick_interval` | query | server default | seconds between ticks; server-clamped |
 | `total_laps` | query | from the data | race distance. Only needed in **live** mode, where OpenF1 reports no lap count for a session in progress. Without it the verdict falls back to a one-lap comparison and says so |
 
@@ -176,23 +189,26 @@ WS /ws/race/{session_key}
 ### Examples
 
 ```bash
-# offline fixture, paced fast
-wscat -c 'ws://localhost:8000/ws/race/sample?mode=replay&tick_interval=0.05'
+# offline fixture, paced fast (it has one car, #1)
+wscat -c 'ws://localhost:8000/ws/race/sample?mode=replay&driver_number=1&tick_interval=0.05'
 
 # a real finished race, one driver
 wscat -c 'ws://localhost:8000/ws/race/9904?mode=replay&driver_number=1'
 
 # whatever is running now
-wscat -c 'wss://f1-pit-strategy.onrender.com/ws/race/latest?mode=live'
+wscat -c 'wss://f1-pit-strategy.onrender.com/ws/race/latest?mode=live&driver_number=16'
 ```
+
+To watch both cars of a team, open two connections. Each has its own decision
+engine; neither reasons about the other car.
 
 The repo ships a client, since curl cannot speak WebSocket:
 
 ```bash
-uv run python scripts/ws_client.py --tick-interval 0.05
+uv run python scripts/ws_client.py --driver-number 1 --tick-interval 0.05
 uv run python scripts/ws_client.py --session-key 9904 --driver-number 1
-uv run python scripts/ws_client.py --session-key latest --mode live
-uv run python scripts/ws_client.py --api-key "$F1_API_KEY"
+uv run python scripts/ws_client.py --session-key latest --mode live --driver-number 16
+uv run python scripts/ws_client.py --driver-number 1 --api-key "$F1_API_KEY"
 ```
 
 ### Message order
@@ -227,7 +243,7 @@ First message on every stream. Describes what is coming.
 | `session_key` | string | |
 | `source` | `"sample"` \| `"historical_replay"` \| `"live"` | **what the server actually did**, not what was requested |
 | `total_laps` | int \| null | **null in live mode** — a race in progress has no known total |
-| `driver_number` | int \| null | |
+| `driver_number` | int | the car requested; every tick and decision carries it |
 
 ```json
 {"type": "start", "session_key": "sample", "source": "sample",
@@ -413,8 +429,8 @@ The stream failed or was refused.
 
 ```json
 {"type": "error",
- "detail": "No stint data for driver 99 in session '9904'. Drivers present: [1, 4, 5, ...]",
- "code": "no_data"}
+ "detail": "Driver 99 is not entered in session '9904'. Drivers entered: [1, 4, 5, ...]",
+ "code": "unknown_driver"}
 ```
 
 ---
@@ -427,7 +443,10 @@ The stream failed or was refused.
 | `origin_not_allowed` | browser origin not in `F1_ALLOWED_ORIGINS` | add it; the message names the configured list |
 | `unknown_mode` | `mode` was not `replay` or `live` | |
 | `sample_is_replay_only` | `session_key=sample` with `mode=live` | the fixture is not a live session |
-| `no_data` | valid request, nothing to stream | check the session key; the message lists drivers present |
+| `driver_number_required` | no `driver_number` query param | add one; `GET /race/{session_key}/drivers` lists the choices |
+| `unknown_driver` | that car is not entered in the session | the message lists the cars that are |
+| `mixed_driver_data` | rows from more than one car reached the flattener | a bug or an upstream filter failure; the stream stops rather than blend cars |
+| `no_data` | valid request, nothing to stream | check the session key and that the car ran |
 | `no_live_session` | *(carried on the dedicated message type)* | nothing is running; the message says what is next |
 | `openf1_unavailable` | OpenF1 unreachable, timed out, or 5xx | upstream problem, not the request |
 | `openf1_rate_limited` | OpenF1 returned 429 | slow down; live mode backs off automatically |
